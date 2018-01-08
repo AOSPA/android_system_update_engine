@@ -38,10 +38,11 @@ using chromeos_update_engine::FakeSystemState;
 using chromeos_update_engine::OmahaRequestParams;
 using std::string;
 using std::unique_ptr;
+using testing::_;
 using testing::DoAll;
 using testing::Return;
 using testing::SetArgPointee;
-using testing::_;
+using update_engine::UpdateAttemptFlags;
 
 namespace {
 
@@ -56,7 +57,9 @@ Time FixedTime() {
   now_exp.minute = 5;
   now_exp.second = 33;
   now_exp.millisecond = 675;
-  return Time::FromLocalExploded(now_exp);
+  Time time;
+  ignore_result(Time::FromLocalExploded(now_exp, &time));
+  return time;
 }
 
 // Rounds down a timestamp to the nearest second. This is useful when faking
@@ -65,11 +68,13 @@ Time RoundedToSecond(Time time) {
   Time::Exploded exp;
   time.LocalExplode(&exp);
   exp.millisecond = 0;
-  return Time::FromLocalExploded(exp);
+  Time rounded_time;
+  ignore_result(Time::FromLocalExploded(exp, &rounded_time));
+  return rounded_time;
 }
 
-ACTION_P(ActionSetUpdateEngineStatusLastCheckedTime, time_ms) {
-  arg0->last_checked_time_ms = time_ms;
+ACTION_P(ActionSetUpdateEngineStatusLastCheckedTime, time) {
+  arg0->last_checked_time = time;
 };
 
 ACTION_P(ActionSetUpdateEngineStatusProgress, progress) {
@@ -425,4 +430,20 @@ TEST_F(UmRealUpdaterProviderTest, GetServerDictatedPollInterval) {
       kPollInterval, provider_->var_server_dictated_poll_interval());
 }
 
+TEST_F(UmRealUpdaterProviderTest, GetUpdateRestrictions) {
+  EXPECT_CALL(*fake_sys_state_.mock_update_attempter(),
+              GetCurrentUpdateAttemptFlags())
+      .WillRepeatedly(Return(UpdateAttemptFlags::kFlagRestrictDownload |
+                             UpdateAttemptFlags::kFlagNonInteractive));
+  UmTestUtils::ExpectVariableHasValue(UpdateRestrictions::kRestrictDownloading,
+                                      provider_->var_update_restrictions());
+}
+
+TEST_F(UmRealUpdaterProviderTest, GetUpdateRestrictionsNone) {
+  EXPECT_CALL(*fake_sys_state_.mock_update_attempter(),
+              GetCurrentUpdateAttemptFlags())
+      .WillRepeatedly(Return(UpdateAttemptFlags::kNone));
+  UmTestUtils::ExpectVariableHasValue(UpdateRestrictions::kNone,
+                                      provider_->var_update_restrictions());
+}
 }  // namespace chromeos_update_manager

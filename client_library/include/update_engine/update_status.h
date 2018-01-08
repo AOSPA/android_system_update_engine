@@ -19,6 +19,8 @@
 
 #include <string>
 
+#include <brillo/enum_flags.h>
+
 namespace update_engine {
 
 enum class UpdateStatus {
@@ -34,9 +36,23 @@ enum class UpdateStatus {
   DISABLED,
 };
 
+// Enum of bit-wise flags for controlling how updates are attempted.
+enum UpdateAttemptFlags : int32_t {
+  kNone = 0,
+  // Treat the update like a non-interactive update, even when being triggered
+  // by the interactive APIs.
+  kFlagNonInteractive = (1 << 0),
+  // Restrict (disallow) downloading of updates.
+  kFlagRestrictDownload = (1 << 1),
+};
+
+// Enable bit-wise operators for the above enumeration of flag values.
+DECLARE_FLAGS_ENUM(UpdateAttemptFlags);
+
 struct UpdateEngineStatus {
-  // When the update_engine last checked for updates (ms since Epoch)
-  int64_t last_checked_time_ms;
+  // When the update_engine last checked for updates (time_t: seconds from unix
+  // epoch)
+  int64_t last_checked_time;
   // the current status/operation of the update_engine
   UpdateStatus status;
   // the current product version (oem bundle id)
