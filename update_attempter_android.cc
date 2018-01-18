@@ -481,6 +481,12 @@ void UpdateAttempterAndroid::TerminateUpdateAndNotify(ErrorCode error_code) {
   SetStatusAndNotify(new_status);
   ongoing_update_ = false;
 
+  // The network id is only applicable to one download attempt and once it's
+  // done the network id should not be re-used anymore.
+  if (!network_selector_->SetProcessNetwork(kDefaultNetworkId)) {
+    LOG(WARNING) << "Unable to unbind network.";
+  }
+
   for (auto observer : daemon_state_->service_observers())
     observer->SendPayloadApplicationComplete(error_code);
 
@@ -533,8 +539,9 @@ void UpdateAttempterAndroid::BuildUpdateActions(const string& url) {
       new DownloadAction(prefs_,
                          boot_control_,
                          hardware_,
-                         nullptr,             // system_state, not used.
-                         download_fetcher));  // passes ownership
+                         nullptr,           // system_state, not used.
+                         download_fetcher,  // passes ownership
+                         true /* is_interactive */));
   shared_ptr<FilesystemVerifierAction> filesystem_verifier_action(
       new FilesystemVerifierAction());
 
