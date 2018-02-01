@@ -410,8 +410,10 @@ void LogPartitionInfoHash(const PartitionInfo& info, const string& tag) {
 
 void LogPartitionInfo(const vector<PartitionUpdate>& partitions) {
   for (const PartitionUpdate& partition : partitions) {
-    LogPartitionInfoHash(partition.old_partition_info(),
-                         "old " + partition.partition_name());
+    if (partition.has_old_partition_info()) {
+      LogPartitionInfoHash(partition.old_partition_info(),
+                           "old " + partition.partition_name());
+    }
     LogPartitionInfoHash(partition.new_partition_info(),
                          "new " + partition.partition_name());
   }
@@ -1009,9 +1011,9 @@ bool DeltaPerformer::PerformZeroOrDiscardOperation(
       if (target_fd_->BlkIoctl(request, start, length, &result) && result == 0)
         continue;
       attempt_ioctl = false;
-      zeros.resize(16 * block_size_);
     }
     // In case of failure, we fall back to writing 0 to the selected region.
+    zeros.resize(16 * block_size_);
     for (uint64_t offset = 0; offset < length; offset += zeros.size()) {
       uint64_t chunk_length = min(length - offset,
                                   static_cast<uint64_t>(zeros.size()));
