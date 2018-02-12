@@ -50,6 +50,7 @@
 #include "update_engine/payload_consumer/extent_reader.h"
 #include "update_engine/payload_consumer/extent_writer.h"
 #include "update_engine/payload_consumer/file_descriptor_utils.h"
+#include "update_engine/payload_consumer/mount_history.h"
 #if USE_MTD
 #include "update_engine/payload_consumer/mtd_file_descriptor.h"
 #endif
@@ -1079,8 +1080,10 @@ namespace {
 
 // Compare |calculated_hash| with source hash in |operation|, return false and
 // dump hash and set |error| if don't match.
+// |source_fd| is the file descriptor of the source partition.
 bool ValidateSourceHash(const brillo::Blob& calculated_hash,
                         const InstallOperation& operation,
+                        const FileDescriptorPtr source_fd,
                         ErrorCode* error) {
   brillo::Blob expected_source_hash(operation.src_sha256_hash().begin(),
                                     operation.src_sha256_hash().end());
@@ -1107,6 +1110,9 @@ bool ValidateSourceHash(const brillo::Blob& calculated_hash,
     LOG(ERROR) << "Operation source (offset:size) in blocks: "
                << base::JoinString(source_extents, ",");
 
+    // Log remount history if this device is an ext4 partition.
+    LogMountHistory(source_fd);
+
     *error = ErrorCode::kDownloadStateInitializationError;
     return false;
   }
@@ -1131,7 +1137,8 @@ bool DeltaPerformer::PerformSourceCopyOperation(
                                                      &source_hash));
 
   if (operation.has_src_sha256_hash()) {
-    TEST_AND_RETURN_FALSE(ValidateSourceHash(source_hash, operation, error));
+    TEST_AND_RETURN_FALSE(
+        ValidateSourceHash(source_hash, operation, source_fd_, error));
   }
 
   return true;
@@ -1197,28 +1204,6 @@ bool DeltaPerformer::PerformBsdiffOperation(const InstallOperation& operation) {
     TEST_AND_RETURN_FALSE(utils::PWriteAll(
         target_fd_, zeros.data(), end_byte - begin_byte, begin_byte));
   }
-  return true;
-}
-
-bool DeltaPerformer::CalculateAndValidateSourceHash(
-    const InstallOperation& operation, ErrorCode* error) {
-  const uint64_t kMaxBlocksToRead = 256;  // 1MB if block size is 4KB
-  auto total_blocks = utils::BlocksInExtents(operation.src_extents());
-  brillo::Blob buf(std::min(kMaxBlocksToRead, total_blocks) * block_size_);
-  DirectExtentReader reader;
-  TEST_AND_RETURN_FALSE(
-      reader.Init(source_fd_, operation.src_extents(), block_size_));
-  HashCalculator source_hasher;
-  while (total_blocks > 0) {
-    auto read_blocks = std::min(total_blocks, kMaxBlocksToRead);
-    TEST_AND_RETURN_FALSE(reader.Read(buf.data(), read_blocks * block_size_));
-    TEST_AND_RETURN_FALSE(
-        source_hasher.Update(buf.data(), read_blocks * block_size_));
-    total_blocks -= read_blocks;
-  }
-  TEST_AND_RETURN_FALSE(source_hasher.Finalize());
-  TEST_AND_RETURN_FALSE(
-      ValidateSourceHash(source_hasher.raw_hash(), operation, error));
   return true;
 }
 
@@ -1302,7 +1287,11 @@ bool DeltaPerformer::PerformSourceBsdiffOperation(
     TEST_AND_RETURN_FALSE(operation.dst_length() % block_size_ == 0);
 
   if (operation.has_src_sha256_hash()) {
-    TEST_AND_RETURN_FALSE(CalculateAndValidateSourceHash(operation, error));
+    brillo::Blob source_hash;
+    TEST_AND_RETURN_FALSE(fd_utils::ReadAndHashExtents(
+        source_fd_, operation.src_extents(), block_size_, &source_hash));
+    TEST_AND_RETURN_FALSE(
+        ValidateSourceHash(source_hash, operation, source_fd_, error));
   }
 
   auto reader = std::make_unique<DirectExtentReader>();
@@ -1415,7 +1404,11 @@ bool DeltaPerformer::PerformPuffDiffOperation(const InstallOperation& operation,
   TEST_AND_RETURN_FALSE(buffer_.size() >= operation.data_length());
 
   if (operation.has_src_sha256_hash()) {
-    TEST_AND_RETURN_FALSE(CalculateAndValidateSourceHash(operation, error));
+    brillo::Blob source_hash;
+    TEST_AND_RETURN_FALSE(fd_utils::ReadAndHashExtents(
+        source_fd_, operation.src_extents(), block_size_, &source_hash));
+    TEST_AND_RETURN_FALSE(
+        ValidateSourceHash(source_hash, operation, source_fd_, error));
   }
 
   auto reader = std::make_unique<DirectExtentReader>();

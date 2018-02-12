@@ -133,6 +133,9 @@ class OmahaRequestParams {
   inline std::string product_components() const {
     return image_props_.product_components;
   }
+  inline void set_product_components(const std::string& product_components) {
+    image_props_.product_components = product_components;
+  }
 
   inline std::string current_channel() const {
     return image_props_.current_channel;
@@ -259,8 +262,13 @@ class OmahaRequestParams {
   FRIEND_TEST(OmahaRequestParamsTest, SetTargetChannelInvalidTest);
   FRIEND_TEST(OmahaRequestParamsTest, ToMoreStableChannelFlagTest);
 
-  // Returns true if |channel| is a valid channel, false otherwise.
-  bool IsValidChannel(const std::string& channel) const;
+  // Returns true if |channel| is a valid channel, otherwise write error to
+  // |error_message| if passed and return false.
+  bool IsValidChannel(const std::string& channel,
+                      std::string* error_message) const;
+  bool IsValidChannel(const std::string& channel) const {
+    return IsValidChannel(channel, nullptr);
+  }
 
   // Returns the index of the given channel.
   int GetChannelIndex(const std::string& channel) const;
