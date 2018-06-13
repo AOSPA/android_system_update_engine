@@ -82,6 +82,7 @@ class BinderUpdateEngineAndroidService final
       const android::sp<android::os::IUpdateEngineCallback>& callback) override;
   ::android::binder::Status triggerPostinstall(
       const ::android::String16& partition) override;
+  android::binder::Status setPerformanceMode(bool enable) override;
 
  private:
   // Remove the passed |callback| from the list of registered callbacks. Called
