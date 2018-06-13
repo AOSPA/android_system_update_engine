@@ -95,4 +95,6 @@ interface IUpdateEngine {
    * @hide
    */
   void triggerPostinstall(in String partition);
+  /** @hide */
+  void setPerformanceMode(in boolean enable);
 }
