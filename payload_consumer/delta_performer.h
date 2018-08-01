@@ -48,9 +48,6 @@ class PrefsInterface;
 
 class DeltaPerformer : public FileWriter {
  public:
-  static const uint64_t kSupportedMajorPayloadVersion;
-  static const uint32_t kSupportedMinorPayloadVersion;
-
   // Defines the granularity of progress logging in terms of how many "completed
   // chunks" we want to report at the most.
   static const unsigned kProgressLogMaxChunks;
@@ -70,14 +67,14 @@ class DeltaPerformer : public FileWriter {
                  DownloadActionDelegate* download_delegate,
                  InstallPlan* install_plan,
                  InstallPlan::Payload* payload,
-                 bool is_interactive)
+                 bool interactive)
       : prefs_(prefs),
         boot_control_(boot_control),
         hardware_(hardware),
         download_delegate_(download_delegate),
         install_plan_(install_plan),
         payload_(payload),
-        is_interactive_(is_interactive) {}
+        interactive_(interactive) {}
 
   // FileWriter's Write implementation where caller doesn't care about
   // error codes.
@@ -98,6 +95,10 @@ class DeltaPerformer : public FileWriter {
   // |current_partition_|. The manifest needs to be already parsed for this to
   // work. Returns whether the required file descriptors were successfully open.
   bool OpenCurrentPartition();
+
+  // Attempt to open the error-corrected device for the current partition.
+  // Returns whether the operation succeeded.
+  bool OpenCurrentECCPartition();
 
   // Closes the current partition file descriptors if open. Returns 0 on success
   // or -errno on error.
@@ -174,6 +175,7 @@ class DeltaPerformer : public FileWriter {
   friend class DeltaPerformerIntegrationTest;
   FRIEND_TEST(DeltaPerformerTest, BrilloMetadataSignatureSizeTest);
   FRIEND_TEST(DeltaPerformerTest, BrilloParsePayloadMetadataTest);
+  FRIEND_TEST(DeltaPerformerTest, ChooseSourceFDTest);
   FRIEND_TEST(DeltaPerformerTest, UsePublicKeyFromResponse);
 
   // Parse and move the update instructions of all partitions into our local
@@ -227,6 +229,13 @@ class DeltaPerformer : public FileWriter {
                                     ErrorCode* error);
   bool PerformPuffDiffOperation(const InstallOperation& operation,
                                 ErrorCode* error);
+
+  // For a given operation, choose the source fd to be used (raw device or error
+  // correction device) based on the source operation hash.
+  // Returns nullptr if the source hash mismatch cannot be corrected, and set
+  // the |error| accordingly.
+  FileDescriptorPtr ChooseSourceFD(const InstallOperation& operation,
+                                   ErrorCode* error);
 
   // Extracts the payload signature message from the blob on the |operation| if
   // the offset matches the one specified by the manifest. Returns whether the
@@ -282,6 +291,22 @@ class DeltaPerformer : public FileWriter {
   // File descriptor of the source partition. Only set while updating a
   // partition when using a delta payload.
   FileDescriptorPtr source_fd_{nullptr};
+
+  // File descriptor of the error corrected source partition. Only set while
+  // updating partition using a delta payload for a partition where error
+  // correction is available. The size of the error corrected device is smaller
+  // than the underlying raw device, since it doesn't include the error
+  // correction blocks.
+  FileDescriptorPtr source_ecc_fd_{nullptr};
+
+  // The total number of operations that failed source hash verification but
+  // passed after falling back to the error-corrected |source_ecc_fd_| device.
+  uint64_t source_ecc_recovered_failures_{0};
+
+  // Whether opening the current partition as an error-corrected device failed.
+  // Used to avoid re-opening the same source partition if it is not actually
+  // error corrected.
+  bool source_ecc_open_failure_{false};
 
   // File descriptor of the target partition. Only set while performing the
   // operations of a given partition.
@@ -363,19 +388,13 @@ class DeltaPerformer : public FileWriter {
   unsigned last_progress_chunk_{0};
 
   // If |true|, the update is user initiated (vs. periodic update checks).
-  bool is_interactive_{false};
+  bool interactive_{false};
 
   // The timeout after which we should force emitting a progress log (constant),
   // and the actual point in time for the next forced log to be emitted.
   const base::TimeDelta forced_progress_log_wait_{
       base::TimeDelta::FromSeconds(kProgressLogTimeoutSeconds)};
   base::Time forced_progress_log_time_;
-
-  // The payload major payload version supported by DeltaPerformer.
-  uint64_t supported_major_version_{kSupportedMajorPayloadVersion};
-
-  // The delta minor payload version supported by DeltaPerformer.
-  uint32_t supported_minor_version_{kSupportedMinorPayloadVersion};
 
   DISALLOW_COPY_AND_ASSIGN(DeltaPerformer);
 };

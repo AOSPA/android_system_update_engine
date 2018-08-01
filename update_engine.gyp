@@ -50,6 +50,7 @@
       '_POSIX_C_SOURCE=199309L',
       'USE_BINDER=<(USE_binder)',
       'USE_DBUS=<(USE_dbus)',
+      'USE_FEC=0',
       'USE_HWID_OVERRIDE=<(USE_hwid_override)',
       'USE_CHROME_KIOSK_APP=<(USE_chrome_kiosk_app)',
       'USE_CHROME_NETWORK_PROXY=<(USE_chrome_network_proxy)',
@@ -124,7 +125,7 @@
       'dependencies': [
         'update_metadata-protos',
       ],
-      #TODO(deymo): Remove unused dependencies once we stop including files
+      # TODO(deymo): Remove unused dependencies once we stop including files
       # from the root directory.
       'variables': {
         'exported_deps': [
@@ -364,6 +365,7 @@
         'exported_deps': [
           'ext2fs',
           'libpuffdiff',
+          'liblzma',
         ],
         'deps': ['<@(exported_deps)'],
       },
@@ -389,6 +391,7 @@
         'payload_generator/annotated_operation.cc',
         'payload_generator/blob_file_writer.cc',
         'payload_generator/block_mapping.cc',
+        'payload_generator/boot_img_filesystem.cc',
         'payload_generator/bzip.cc',
         'payload_generator/cycle_breaker.cc',
         'payload_generator/deflate_utils.cc',
@@ -542,6 +545,7 @@
             'payload_generator/ab_generator_unittest.cc',
             'payload_generator/blob_file_writer_unittest.cc',
             'payload_generator/block_mapping_unittest.cc',
+            'payload_generator/boot_img_filesystem_unittest.cc',
             'payload_generator/cycle_breaker_unittest.cc',
             'payload_generator/deflate_utils_unittest.cc',
             'payload_generator/delta_diff_utils_unittest.cc',

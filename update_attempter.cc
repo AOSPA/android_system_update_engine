@@ -863,11 +863,10 @@ void UpdateAttempter::OnUpdateScheduled(EvalStatus status,
       return;
     }
 
-    LOG(INFO) << "Running "
-              << (params.is_interactive ? "interactive" : "periodic")
+    LOG(INFO) << "Running " << (params.interactive ? "interactive" : "periodic")
               << " update.";
 
-    if (!params.is_interactive) {
+    if (!params.interactive) {
       // Cache the update attempt flags that will be used by this update attempt
       // so that they can't be changed mid-way through.
       current_update_attempt_flags_ = update_attempt_flags_;
@@ -876,8 +875,12 @@ void UpdateAttempter::OnUpdateScheduled(EvalStatus status,
     LOG(INFO) << "Update attempt flags in use = 0x" << std::hex
               << current_update_attempt_flags_;
 
-    Update(forced_app_version_, forced_omaha_url_, params.target_channel,
-           params.target_version_prefix, false, params.is_interactive);
+    Update(forced_app_version_,
+           forced_omaha_url_,
+           params.target_channel,
+           params.target_version_prefix,
+           false,
+           params.interactive);
     // Always clear the forced app_version and omaha_url after an update attempt
     // so the next update uses the defaults.
     forced_app_version_.clear();
@@ -925,6 +928,8 @@ void UpdateAttempter::ProcessingDone(const ActionProcessor* processor,
     LOG(INFO) << "Booted from FW B and tried to install new firmware, "
         "so requesting reboot from user.";
   }
+
+  attempt_error_code_ = utils::GetBaseErrorCode(code);
 
   if (code == ErrorCode::kSuccess) {
     WriteUpdateCompletedMarker();
@@ -1062,8 +1067,10 @@ void UpdateAttempter::ActionCompleted(ActionProcessor* processor,
         code != ErrorCode::kDownloadTransferError) {
       MarkDeltaUpdateFailure();
     }
-    // On failure, schedule an error event to be sent to Omaha.
-    CreatePendingErrorEvent(action, code);
+    if (code != ErrorCode::kNoUpdate) {
+      // On failure, schedule an error event to be sent to Omaha.
+      CreatePendingErrorEvent(action, code);
+    }
     return;
   }
   // Find out which action completed (successfully).
@@ -1263,19 +1270,9 @@ void UpdateAttempter::SetStatusAndNotify(UpdateStatus status) {
 
 void UpdateAttempter::CreatePendingErrorEvent(AbstractAction* action,
                                               ErrorCode code) {
-  if (error_event_.get()) {
+  if (error_event_.get() || status_ == UpdateStatus::REPORTING_ERROR_EVENT) {
     // This shouldn't really happen.
     LOG(WARNING) << "There's already an existing pending error event.";
-    return;
-  }
-
-  // For now assume that a generic Omaha response action failure means that
-  // there's no update so don't send an event. Also, double check that the
-  // failure has not occurred while sending an error event -- in which case
-  // don't schedule another. This shouldn't really happen but just in case...
-  if ((action->Type() == OmahaResponseHandlerAction::StaticType() &&
-       code == ErrorCode::kError) ||
-      status_ == UpdateStatus::REPORTING_ERROR_EVENT) {
     return;
   }
 
@@ -1427,7 +1424,7 @@ bool UpdateAttempter::DecrementUpdateCheckCount() {
 
     // Write out the new value of update_check_count_value.
     if (prefs_->SetInt64(kPrefsUpdateCheckCount, update_check_count_value)) {
-      // We successfully wrote out te new value, so enable the
+      // We successfully wrote out the new value, so enable the
       // update check based wait.
       LOG(INFO) << "New update check count = " << update_check_count_value;
       return true;

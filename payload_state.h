@@ -150,10 +150,6 @@ class PayloadState : public PayloadStateInterface {
     return p2p_url_;
   }
 
-  inline ErrorCode GetAttemptErrorCode() const override {
-    return attempt_error_code_;
-  }
-
   bool NextPayload() override;
 
  private:
@@ -341,7 +337,7 @@ class PayloadState : public PayloadStateInterface {
 
   // Loads the number of bytes that have been currently downloaded through the
   // previous attempts from the persisted state for the given source. It's
-  // reset to 0 everytime we begin a full update and is continued from previous
+  // reset to 0 every time we begin a full update and is continued from previous
   // attempt if we're resuming the update.
   void LoadCurrentBytesDownloaded(DownloadSource source);
 
@@ -353,7 +349,7 @@ class PayloadState : public PayloadStateInterface {
 
   // Loads the total number of bytes that have been downloaded (since the last
   // successful update) from the persisted state for the given source. It's
-  // reset to 0 everytime we successfully apply an update and counts the bytes
+  // reset to 0 every time we successfully apply an update and counts the bytes
   // downloaded for both successful and failed attempts since then.
   void LoadTotalBytesDownloaded(DownloadSource source);
 
@@ -489,7 +485,7 @@ class PayloadState : public PayloadStateInterface {
   int32_t url_switch_count_;
 
   // The current download source based on the current URL. This value is
-  // not persisted as it can be recomputed everytime we update the URL.
+  // not persisted as it can be recomputed every time we update the URL.
   // We're storing this so as not to recompute this on every few bytes of
   // data we read from the socket.
   DownloadSource current_download_source_;
@@ -567,9 +563,6 @@ class PayloadState : public PayloadStateInterface {
 
   // The connection type when the attempt started.
   metrics::ConnectionType attempt_connection_type_;
-
-  // The attempt error code when the attempt finished.
-  ErrorCode attempt_error_code_;
 
   // Whether we're currently rolling back.
   AttemptType attempt_type_;

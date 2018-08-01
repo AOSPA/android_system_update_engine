@@ -76,13 +76,14 @@ static const char* kTagPrompt = "Prompt";
 static const char* kTagDisableP2PForDownloading = "DisableP2PForDownloading";
 static const char* kTagDisableP2PForSharing = "DisableP2PForSharing";
 static const char* kTagPublicKeyRsa = "PublicKeyRsa";
+static const char* kTagPowerwash = "Powerwash";
 
 static const char* kOmahaUpdaterVersion = "0.1.0.0";
 
-// X-GoogleUpdate headers.
-static const char* kXGoogleUpdateInteractivity = "X-GoogleUpdate-Interactivity";
-static const char* kXGoogleUpdateAppId = "X-GoogleUpdate-AppId";
-static const char* kXGoogleUpdateUpdater = "X-GoogleUpdate-Updater";
+// X-Goog-Update headers.
+static const char* kXGoogleUpdateInteractivity = "X-Goog-Update-Interactivity";
+static const char* kXGoogleUpdateAppId = "X-Goog-Update-AppId";
+static const char* kXGoogleUpdateUpdater = "X-Goog-Update-Updater";
 
 // updatecheck attributes (without the underscore prefix).
 static const char* kEolAttr = "eol";
@@ -179,7 +180,7 @@ string GetCohortArgXml(PrefsInterface* prefs,
                        const string arg_name,
                        const string prefs_key) {
   // There's nothing wrong with not having a given cohort setting, so we check
-  // existance first to avoid the warning log message.
+  // existence first to avoid the warning log message.
   if (!prefs->Exists(prefs_key))
     return "";
   string cohort_value;
@@ -762,7 +763,7 @@ void OmahaRequestAction::PerformAction() {
                                     GetInstallDate(system_state_),
                                     system_state_));
 
-  // Set X-GoogleUpdate headers.
+  // Set X-Goog-Update headers.
   http_fetcher_->SetHeader(kXGoogleUpdateInteractivity,
                            params_->interactive() ? "fg" : "bg");
   http_fetcher_->SetHeader(kXGoogleUpdateAppId, params_->GetAppId());
@@ -1085,6 +1086,7 @@ bool OmahaRequestAction::ParseParams(OmahaParserData* parser_data,
 
   output_object->disable_payload_backoff =
       ParseBool(attrs[kTagDisablePayloadBackoff]);
+  output_object->powerwash_required = ParseBool(attrs[kTagPowerwash]);
 
   return true;
 }

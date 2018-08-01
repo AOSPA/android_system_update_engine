@@ -110,7 +110,7 @@ bool ReadPipe(const std::string& cmd, std::string* out_p);
 // occurs, -1 is returned.
 off_t BlockDevSize(int fd);
 
-// Returns the size of the file at path, or the file desciptor fd. If the file
+// Returns the size of the file at path, or the file descriptor fd. If the file
 // is actually a block device, this function will automatically call
 // BlockDevSize. If the file doesn't exist or some error occurrs, -1 is
 // returned.
@@ -228,20 +228,6 @@ inline void HexDumpVector(const brillo::Blob& vect) {
   HexDumpArray(vect.data(), vect.size());
 }
 
-template<typename KeyType, typename ValueType>
-bool MapContainsKey(const std::map<KeyType, ValueType>& m, const KeyType& k) {
-  return m.find(k) != m.end();
-}
-template<typename KeyType>
-bool SetContainsKey(const std::set<KeyType>& s, const KeyType& k) {
-  return s.find(k) != s.end();
-}
-
-template<typename T>
-bool VectorContainsValue(const std::vector<T>& vect, const T& value) {
-  return std::find(vect.begin(), vect.end(), value) != vect.end();
-}
-
 template<typename T>
 bool VectorIndexOf(const std::vector<T>& vect, const T& value,
                    typename std::vector<T>::size_type* out_index) {
@@ -330,6 +316,16 @@ bool ReadExtents(const std::string& path, const std::vector<Extent>& extents,
 // is constants during the same boot of the kernel and is regenerated after
 // reboot. Returns whether it succeeded getting the boot_id.
 bool GetBootId(std::string* boot_id);
+
+// Divide |x| by |y| and round up to the nearest integer.
+constexpr uint64_t DivRoundUp(uint64_t x, uint64_t y) {
+  return (x + y - 1) / y;
+}
+
+// Round |x| up to be a multiple of |y|.
+constexpr uint64_t RoundUp(uint64_t x, uint64_t y) {
+  return DivRoundUp(x, y) * y;
+}
 
 }  // namespace utils
 

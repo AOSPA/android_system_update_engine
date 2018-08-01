@@ -143,6 +143,7 @@ struct FakeUpdateResponse {
            (disable_p2p_for_downloading ? "DisableP2PForDownloading=\"true\" "
                                         : "") +
            (disable_p2p_for_sharing ? "DisableP2PForSharing=\"true\" " : "") +
+           (powerwash ? "Powerwash=\"true\" " : "") +
            "/></actions></manifest></updatecheck></app>" +
            (multi_app
                 ? "<app appid=\"" + app_id2 + "\"" +
@@ -189,6 +190,8 @@ struct FakeUpdateResponse {
   // P2P setting defaults to allowed.
   bool disable_p2p_for_downloading = false;
   bool disable_p2p_for_sharing = false;
+
+  bool powerwash = false;
 
   // Omaha cohorts settings.
   bool include_cohorts = false;
@@ -558,6 +561,7 @@ TEST_F(OmahaRequestActionTest, ValidUpdateTest) {
   EXPECT_EQ(true, response.packages[0].is_delta);
   EXPECT_EQ(fake_update_response_.prompt == "true", response.prompt);
   EXPECT_EQ(fake_update_response_.deadline, response.deadline);
+  EXPECT_FALSE(response.powerwash_required);
   // Omaha cohort attributes are not set in the response, so they should not be
   // persisted.
   EXPECT_FALSE(fake_prefs_.Exists(kPrefsOmahaCohort));
@@ -726,6 +730,23 @@ TEST_F(OmahaRequestActionTest, MultiAppMultiPackageUpdateTest) {
   EXPECT_EQ(false, response.packages[2].is_delta);
 }
 
+TEST_F(OmahaRequestActionTest, PowerwashTest) {
+  OmahaResponse response;
+  fake_update_response_.powerwash = true;
+  ASSERT_TRUE(TestUpdateCheck(nullptr,  // request_params
+                              fake_update_response_.GetUpdateResponse(),
+                              -1,
+                              false,  // ping_only
+                              ErrorCode::kSuccess,
+                              metrics::CheckResult::kUpdateAvailable,
+                              metrics::CheckReaction::kUpdating,
+                              metrics::DownloadErrorCode::kUnset,
+                              &response,
+                              nullptr));
+  EXPECT_TRUE(response.update_exists);
+  EXPECT_TRUE(response.powerwash_required);
+}
+
 TEST_F(OmahaRequestActionTest, ExtraHeadersSentTest) {
   const string http_response = "<?xml invalid response";
   request_params_.set_interactive(true);
@@ -748,9 +769,9 @@ TEST_F(OmahaRequestActionTest, ExtraHeadersSentTest) {
 
   // Check that the headers were set in the fetcher during the action. Note that
   // we set this request as "interactive".
-  EXPECT_EQ("fg", fetcher->GetHeader("X-GoogleUpdate-Interactivity"));
-  EXPECT_EQ(kTestAppId, fetcher->GetHeader("X-GoogleUpdate-AppId"));
-  EXPECT_NE("", fetcher->GetHeader("X-GoogleUpdate-Updater"));
+  EXPECT_EQ("fg", fetcher->GetHeader("X-Goog-Update-Interactivity"));
+  EXPECT_EQ(kTestAppId, fetcher->GetHeader("X-Goog-Update-AppId"));
+  EXPECT_NE("", fetcher->GetHeader("X-Goog-Update-Updater"));
 }
 
 TEST_F(OmahaRequestActionTest, ValidUpdateBlockedByConnection) {

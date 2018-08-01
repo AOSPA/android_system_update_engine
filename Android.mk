@@ -22,6 +22,7 @@ LOCAL_PATH := $(my-dir)
 # by setting BRILLO_USE_* values. Note that we define local variables like
 # local_use_* to prevent leaking our default setting for other packages.
 local_use_binder := $(if $(BRILLO_USE_BINDER),$(BRILLO_USE_BINDER),1)
+local_use_fec := 1
 local_use_hwid_override := \
     $(if $(BRILLO_USE_HWID_OVERRIDE),$(BRILLO_USE_HWID_OVERRIDE),0)
 local_use_mtd := $(if $(BRILLO_USE_MTD),$(BRILLO_USE_MTD),0)
@@ -35,6 +36,7 @@ ue_common_cflags := \
     -DUSE_BINDER=$(local_use_binder) \
     -DUSE_CHROME_NETWORK_PROXY=$(local_use_chrome_network_proxy) \
     -DUSE_CHROME_KIOSK_APP=$(local_use_chrome_kiosk_app) \
+    -DUSE_FEC=$(local_use_fec) \
     -DUSE_HWID_OVERRIDE=$(local_use_hwid_override) \
     -DUSE_MTD=$(local_use_mtd) \
     -DUSE_OMAHA=$(local_use_omaha) \
@@ -148,13 +150,20 @@ ue_libpayload_consumer_src_files := \
     payload_consumer/postinstall_runner_action.cc \
     payload_consumer/xz_extent_writer.cc
 
+ifeq ($(local_use_fec),1)
+ue_libpayload_consumer_src_files += \
+    payload_consumer/fec_file_descriptor.cc
+ue_libpayload_consumer_exported_shared_libraries += \
+    libfec
+endif  # local_use_fec == 1
+
 ifeq ($(HOST_OS),linux)
 # Build for the host.
 include $(CLEAR_VARS)
 LOCAL_MODULE := libpayload_consumer
 LOCAL_MODULE_CLASS := STATIC_LIBRARIES
 LOCAL_CPP_EXTENSION := .cc
-LOCAL_CFLAGS := $(ue_common_cflags)
+LOCAL_CFLAGS := $(filter-out -DUSE_FEC=%,$(ue_common_cflags)) -DUSE_FEC=0
 LOCAL_CPPFLAGS := $(ue_common_cppflags)
 LOCAL_LDFLAGS := $(ue_common_ldflags)
 LOCAL_C_INCLUDES := \
@@ -216,8 +225,7 @@ LOCAL_CFLAGS := $(ue_common_cflags)
 LOCAL_CPPFLAGS := $(ue_common_cppflags)
 LOCAL_LDFLAGS := $(ue_common_ldflags)
 LOCAL_C_INCLUDES := \
-    $(ue_common_c_includes) \
-    bootable/recovery
+    $(ue_common_c_includes)
 LOCAL_STATIC_LIBRARIES := \
     $(ue_common_static_libraries) \
     $(ue_libupdate_engine_boot_control_exported_static_libraries)
@@ -239,6 +247,7 @@ ue_libupdate_engine_exported_c_includes := \
 ue_libupdate_engine_exported_static_libraries := \
     libpayload_consumer \
     update_metadata-protos \
+    libbootloader_message \
     libbz \
     libfs_mgr \
     libbase \
@@ -275,8 +284,7 @@ LOCAL_CPPFLAGS := $(ue_common_cppflags)
 LOCAL_LDFLAGS := $(ue_common_ldflags)
 LOCAL_C_INCLUDES := \
     $(ue_common_c_includes) \
-    $(ue_libupdate_engine_exported_c_includes) \
-    bootable/recovery
+    $(ue_libupdate_engine_exported_c_includes)
 LOCAL_STATIC_LIBRARIES := \
     libpayload_consumer \
     update_metadata-protos \
@@ -356,6 +364,7 @@ endif  # local_use_binder == 1
 # loop to apply payloads provided by the upper layer via a Binder interface.
 ue_libupdate_engine_android_exported_static_libraries := \
     libpayload_consumer \
+    libbootloader_message \
     libfs_mgr \
     libbase \
     liblog \
@@ -383,8 +392,7 @@ LOCAL_CFLAGS := $(ue_common_cflags)
 LOCAL_CPPFLAGS := $(ue_common_cppflags)
 LOCAL_LDFLAGS := $(ue_common_ldflags)
 LOCAL_C_INCLUDES := \
-    $(ue_common_c_includes) \
-    bootable/recovery
+    $(ue_common_c_includes)
 #TODO(deymo): Remove external/cros/system_api/dbus once the strings are moved
 # out of the DBus interface.
 LOCAL_C_INCLUDES += \
@@ -472,8 +480,7 @@ LOCAL_CFLAGS := \
 LOCAL_CPPFLAGS := $(ue_common_cppflags)
 LOCAL_LDFLAGS := $(ue_common_ldflags)
 LOCAL_C_INCLUDES := \
-    $(ue_common_c_includes) \
-    bootable/recovery
+    $(ue_common_c_includes)
 #TODO(deymo): Remove external/cros/system_api/dbus once the strings are moved
 # out of the DBus interface.
 LOCAL_C_INCLUDES += \
@@ -490,6 +497,7 @@ LOCAL_SRC_FILES := \
     update_status_utils.cc \
     utils_android.cc
 LOCAL_STATIC_LIBRARIES := \
+    libbootloader_message \
     libfs_mgr \
     libbase \
     liblog \
@@ -510,6 +518,21 @@ LOCAL_STATIC_LIBRARIES += \
     libevent \
     libmodpb64 \
     libgtest_prod
+
+ifeq ($(local_use_fec),1)
+# The static library "libfec" depends on a bunch of other static libraries, but
+# such dependency is not handled by the build system, so we need to add them
+# here.
+LOCAL_STATIC_LIBRARIES += \
+    libext4_utils \
+    libsquashfs_utils \
+    libcutils \
+    libcrypto_utils \
+    libcrypto \
+    libcutils \
+    libbase \
+    libfec_rs
+endif  # local_use_fec == 1
 
 ifeq ($(strip $(PRODUCT_STATIC_BOOT_CONTROL_HAL)),)
 # No static boot_control HAL defined, so no sideload support. We use a fake
@@ -632,6 +655,7 @@ ue_libpayload_generator_src_files := \
     payload_generator/annotated_operation.cc \
     payload_generator/blob_file_writer.cc \
     payload_generator/block_mapping.cc \
+    payload_generator/boot_img_filesystem.cc \
     payload_generator/bzip.cc \
     payload_generator/cycle_breaker.cc \
     payload_generator/deflate_utils.cc \
@@ -737,6 +761,7 @@ LOCAL_SHARED_LIBRARIES := \
     $(ue_common_shared_libraries) \
     $(ue_libpayload_consumer_exported_shared_libraries) \
     $(ue_libpayload_generator_exported_shared_libraries)
+LOCAL_SHARED_LIBRARIES := $(filter-out libfec,$(LOCAL_SHARED_LIBRARIES))
 LOCAL_SRC_FILES := $(ue_delta_generator_src_files)
 include $(BUILD_HOST_EXECUTABLE)
 endif  # HOST_OS == linux
@@ -932,6 +957,7 @@ LOCAL_SRC_FILES := \
     payload_generator/ab_generator_unittest.cc \
     payload_generator/blob_file_writer_unittest.cc \
     payload_generator/block_mapping_unittest.cc \
+    payload_generator/boot_img_filesystem_unittest.cc \
     payload_generator/cycle_breaker_unittest.cc \
     payload_generator/deflate_utils_unittest.cc \
     payload_generator/delta_diff_utils_unittest.cc \
@@ -1014,7 +1040,6 @@ LOCAL_MODULE_CLASS := ETC
 LOCAL_MODULE_PATH := $(TARGET_OUT_ETC)/update_engine
 LOCAL_MODULE_STEM := update-payload-key.pub.pem
 LOCAL_SRC_FILES := update_payload_key/brillo-update-payload-key.pub.pem
-LOCAL_BUILT_MODULE_STEM := update_payload_key/brillo-update-payload-key.pub.pem
 include $(BUILD_PREBUILT)
 endif  # PRODUCT_IOT
 
