@@ -318,6 +318,7 @@ LOCAL_SRC_FILES := \
     proxy_resolver.cc \
     real_system_state.cc \
     update_attempter.cc \
+    update_boot_flags_action.cc \
     update_manager/android_things_policy.cc \
     update_manager/api_restricted_downloads_policy_impl.cc \
     update_manager/boxed_value.cc \
@@ -334,8 +335,11 @@ LOCAL_SRC_FILES := \
     update_manager/real_system_provider.cc \
     update_manager/real_time_provider.cc \
     update_manager/real_updater_provider.cc \
+    update_manager/staging_utils.cc \
     update_manager/state_factory.cc \
     update_manager/update_manager.cc \
+    update_manager/update_time_restrictions_policy_impl.cc \
+    update_manager/weekly_time.cc \
     update_status_utils.cc \
     utils_android.cc
 ifeq ($(local_use_binder),1)
@@ -418,6 +422,7 @@ LOCAL_SRC_FILES += \
     network_selector_android.cc \
     proxy_resolver.cc \
     update_attempter_android.cc \
+    update_boot_flags_action.cc \
     update_status_utils.cc \
     utils_android.cc
 include $(BUILD_STATIC_LIBRARY)
@@ -466,12 +471,12 @@ include $(BUILD_EXECUTABLE)
 
 # update_engine_sideload (type: executable)
 # ========================================================
-# A static binary equivalent to update_engine daemon that installs an update
-# from a local file directly instead of running in the background.
+# A binary executable equivalent to update_engine daemon that installs an update
+# from a local file directly instead of running in the background. Used in
+# recovery image.
 include $(CLEAR_VARS)
 LOCAL_MODULE := update_engine_sideload
-LOCAL_FORCE_STATIC_EXECUTABLE := true
-LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/sbin
+LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/system/bin
 LOCAL_MODULE_CLASS := EXECUTABLES
 LOCAL_CPP_EXTENSION := .cc
 LOCAL_CFLAGS := \
@@ -494,45 +499,35 @@ LOCAL_SRC_FILES := \
     proxy_resolver.cc \
     sideload_main.cc \
     update_attempter_android.cc \
+    update_boot_flags_action.cc \
     update_status_utils.cc \
     utils_android.cc
+# Use commonly used shared libraries. libprotobuf-cpp-lite.so is filtered out,
+# as it doesn't look beneficial to be installed separately due to its size. Note
+# that we explicitly request their recovery variants, so that the expected files
+# will be used and installed.
+LOCAL_SHARED_LIBRARIES := \
+    libbase.recovery \
+    libbootloader_message.recovery \
+    libfs_mgr.recovery \
+    liblog.recovery \
+    $(filter-out libprotobuf-cpp-lite.recovery,$(ue_libpayload_consumer_exported_shared_libraries:=.recovery))
 LOCAL_STATIC_LIBRARIES := \
-    libbootloader_message \
-    libfs_mgr \
-    libbase \
-    liblog \
     libpayload_consumer \
     update_metadata-protos \
     $(ue_common_static_libraries) \
     $(ue_libpayload_consumer_exported_static_libraries:-host=) \
     $(ue_update_metadata_protos_exported_static_libraries)
-# We add the static versions of the shared libraries since we are forcing this
-# binary to be a static binary, so we also need to include all the static
-# library dependencies of these static libraries.
+# We add the static versions of the shared libraries that are not installed to
+# recovery image due to size concerns. Need to include all the static library
+# dependencies of these static libraries.
 LOCAL_STATIC_LIBRARIES += \
     $(ue_common_shared_libraries) \
-    libbase \
-    liblog \
-    $(ue_libpayload_consumer_exported_shared_libraries:-host=) \
     $(ue_update_metadata_protos_exported_shared_libraries) \
     libevent \
     libmodpb64 \
-    libgtest_prod
-
-ifeq ($(local_use_fec),1)
-# The static library "libfec" depends on a bunch of other static libraries, but
-# such dependency is not handled by the build system, so we need to add them
-# here.
-LOCAL_STATIC_LIBRARIES += \
-    libext4_utils \
-    libsquashfs_utils \
-    libcutils \
-    libcrypto_utils \
-    libcrypto \
-    libcutils \
-    libbase \
-    libfec_rs
-endif  # local_use_fec == 1
+    libgtest_prod \
+    libprotobuf-cpp-lite
 
 ifeq ($(strip $(PRODUCT_STATIC_BOOT_CONTROL_HAL)),)
 # No static boot_control HAL defined, so no sideload support. We use a fake
@@ -1001,6 +996,7 @@ LOCAL_SRC_FILES += \
     payload_state_unittest.cc \
     parcelable_update_engine_status_unittest.cc \
     update_attempter_unittest.cc \
+    update_boot_flags_action_unittest.cc \
     update_manager/android_things_policy_unittest.cc \
     update_manager/boxed_value_unittest.cc \
     update_manager/chromeos_policy.cc \
@@ -1017,9 +1013,12 @@ LOCAL_SRC_FILES += \
     update_manager/real_system_provider_unittest.cc \
     update_manager/real_time_provider_unittest.cc \
     update_manager/real_updater_provider_unittest.cc \
+    update_manager/staging_utils_unittest.cc \
     update_manager/umtest_utils.cc \
     update_manager/update_manager_unittest.cc \
-    update_manager/variable_unittest.cc
+    update_manager/update_time_restrictions_policy_impl_unittest.cc \
+    update_manager/variable_unittest.cc \
+    update_manager/weekly_time_unittest.cc
 else  # local_use_omaha == 1
 LOCAL_STATIC_LIBRARIES += \
     libupdate_engine_android \
