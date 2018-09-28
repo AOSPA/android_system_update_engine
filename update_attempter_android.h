@@ -114,8 +114,9 @@ class UpdateAttempterAndroid
   void SetStatusAndNotify(UpdateStatus status);
 
   // Helper method to construct the sequence of actions to be performed for
-  // applying an update from the given |url|.
-  void BuildUpdateActions(const std::string& url);
+  // applying an update using a given HttpFetcher. The ownership of |fetcher| is
+  // passed to this function.
+  void BuildUpdateActions(HttpFetcher* fetcher);
 
   // Writes to the processing completed marker. Does nothing if
   // |update_completed_marker_| is empty.
@@ -129,7 +130,10 @@ class UpdateAttempterAndroid
   // payload_id.
   // |KprefsNumReboots|: number of reboots when applying the current update.
   // |kPrefsSystemUpdatedMarker|: end timestamp of the last successful update.
-  // |kPrefsUpdateTimestampStart|: start timestamp of the current update.
+  // |kPrefsUpdateTimestampStart|: start timestamp in monotonic time of the
+  // current update.
+  // |kPrefsUpdateBootTimestampStart|: start timestamp in boot time of
+  // the current update.
   // |kPrefsCurrentBytesDownloaded|: number of bytes downloaded for the current
   // payload_id.
   // |kPrefsTotalBytesDownloaded|: number of bytes downloaded in total since
@@ -150,13 +154,14 @@ class UpdateAttempterAndroid
   void UpdatePrefsAndReportUpdateMetricsOnReboot();
 
   // Prefs to update:
-  //   |kPrefsPayloadAttemptNumber|, |kPrefsUpdateTimestampStart|
+  //   |kPrefsPayloadAttemptNumber|, |kPrefsUpdateTimestampStart|,
+  //   |kPrefsUpdateBootTimestampStart|
   void UpdatePrefsOnUpdateStart(bool is_resume);
 
   // Prefs to delete:
   //   |kPrefsNumReboots|, |kPrefsPayloadAttemptNumber|,
   //   |kPrefsSystemUpdatedMarker|, |kPrefsUpdateTimestampStart|,
-  //   |kPrefsCurrentBytesDownloaded|
+  //   |kPrefsUpdateBootTimestampStart|, |kPrefsCurrentBytesDownloaded|
   void ClearMetricsPrefs();
 
   DaemonStateInterface* daemon_state_;
@@ -171,13 +176,8 @@ class UpdateAttempterAndroid
   // set back in the middle of an update.
   base::TimeTicks last_notify_time_;
 
-  // The list of actions and action processor that runs them asynchronously.
-  // Only used when |ongoing_update_| is true.
-  std::vector<std::shared_ptr<AbstractAction>> actions_;
+  // The processor for running Actions.
   std::unique_ptr<ActionProcessor> processor_;
-
-  // Pointer to the DownloadAction in the actions_ vector.
-  std::shared_ptr<DownloadAction> download_action_;
 
   // The InstallPlan used during the ongoing update.
   InstallPlan install_plan_;
@@ -194,10 +194,6 @@ class UpdateAttempterAndroid
 
   // Helper class to select the network to use during the update.
   std::unique_ptr<NetworkSelectorInterface> network_selector_;
-
-  // Whether we have marked the current slot as good. This step is required
-  // before applying an update to the other slot.
-  bool updated_boot_flags_ = false;
 
   std::unique_ptr<ClockInterface> clock_;
 
