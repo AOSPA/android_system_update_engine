@@ -16,7 +16,9 @@
 
 #include "update_engine/boot_control_chromeos.h"
 
+#include <memory>
 #include <string>
+#include <utility>
 
 #include <base/bind.h>
 #include <base/files/file_path.h>
@@ -299,5 +301,12 @@ int BootControlChromeOS::GetPartitionNumber(
   LOG(ERROR) << "Unknown Chrome OS partition name \"" << partition_name << "\"";
   return -1;
 }
+
+bool BootControlChromeOS::InitPartitionMetadata(
+    Slot slot, const PartitionSizes& partition_sizes) {
+  return true;
+}
+
+void BootControlChromeOS::Cleanup() {}
 
 }  // namespace chromeos_update_engine
