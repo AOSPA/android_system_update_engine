@@ -37,10 +37,13 @@ using android::dm::DmDeviceState;
 using android::fs_mgr::CreateLogicalPartition;
 using android::fs_mgr::DestroyLogicalPartition;
 using android::fs_mgr::MetadataBuilder;
+using android::fs_mgr::PartitionOpener;
 
 namespace chromeos_update_engine {
 
-constexpr char kUseDynamicPartitions[] = "ro.boot.logical_partitions";
+constexpr char kUseDynamicPartitions[] = "ro.boot.dynamic_partitions";
+constexpr char kRetrfoitDynamicPartitions[] =
+    "ro.boot.dynamic_partitions_retrofit";
 constexpr uint64_t kMapTimeoutMillis = 1000;
 
 DynamicPartitionControlAndroid::~DynamicPartitionControlAndroid() {
@@ -51,15 +54,20 @@ bool DynamicPartitionControlAndroid::IsDynamicPartitionsEnabled() {
   return GetBoolProperty(kUseDynamicPartitions, false);
 }
 
+static bool IsDynamicPartitionsRetrofit() {
+  return GetBoolProperty(kRetrfoitDynamicPartitions, false);
+}
+
 bool DynamicPartitionControlAndroid::MapPartitionOnDeviceMapper(
     const std::string& super_device,
     const std::string& target_partition_name,
     uint32_t slot,
+    bool force_writable,
     std::string* path) {
   if (!CreateLogicalPartition(super_device.c_str(),
                               slot,
                               target_partition_name,
-                              true /* force_writable */,
+                              force_writable,
                               std::chrono::milliseconds(kMapTimeoutMillis),
                               path)) {
     LOG(ERROR) << "Cannot map " << target_partition_name << " in "
@@ -67,7 +75,8 @@ bool DynamicPartitionControlAndroid::MapPartitionOnDeviceMapper(
     return false;
   }
   LOG(INFO) << "Succesfully mapped " << target_partition_name
-            << " to device mapper; device path at " << *path;
+            << " to device mapper (force_writable = " << force_writable
+            << "); device path at " << *path;
   mapped_devices_.insert(target_partition_name);
   return true;
 }
@@ -120,12 +129,25 @@ bool DynamicPartitionControlAndroid::GetDmDevicePathByName(
 
 std::unique_ptr<MetadataBuilder>
 DynamicPartitionControlAndroid::LoadMetadataBuilder(
-    const std::string& super_device, uint32_t source_slot) {
-  auto builder = MetadataBuilder::New(super_device, source_slot);
+    const std::string& super_device,
+    uint32_t source_slot,
+    uint32_t target_slot) {
+  std::unique_ptr<MetadataBuilder> builder;
+
+  if (target_slot != BootControlInterface::kInvalidSlot &&
+      IsDynamicPartitionsRetrofit()) {
+    builder = MetadataBuilder::NewForUpdate(
+        PartitionOpener(), super_device, source_slot, target_slot);
+  } else {
+    builder =
+        MetadataBuilder::New(PartitionOpener(), super_device, source_slot);
+  }
+
   if (builder == nullptr) {
     LOG(WARNING) << "No metadata slot "
                  << BootControlInterface::SlotName(source_slot) << " in "
                  << super_device;
+    return nullptr;
   }
   LOG(INFO) << "Loaded metadata from slot "
             << BootControlInterface::SlotName(source_slot) << " in "
@@ -145,16 +167,24 @@ bool DynamicPartitionControlAndroid::StoreMetadata(
     return false;
   }
 
-  if (!UpdatePartitionTable(super_device, *metadata, target_slot)) {
-    LOG(ERROR) << "Cannot write metadata to slot "
-               << BootControlInterface::SlotName(target_slot) << " in "
-               << super_device;
-    return false;
+  if (IsDynamicPartitionsRetrofit()) {
+    if (!FlashPartitionTable(super_device, *metadata)) {
+      LOG(ERROR) << "Cannot write metadata to " << super_device;
+      return false;
+    }
+    LOG(INFO) << "Written metadata to " << super_device;
+  } else {
+    if (!UpdatePartitionTable(super_device, *metadata, target_slot)) {
+      LOG(ERROR) << "Cannot write metadata to slot "
+                 << BootControlInterface::SlotName(target_slot) << " in "
+                 << super_device;
+      return false;
+    }
+    LOG(INFO) << "Copied metadata to slot "
+              << BootControlInterface::SlotName(target_slot) << " in "
+              << super_device;
   }
 
-  LOG(INFO) << "Copied metadata to slot "
-            << BootControlInterface::SlotName(target_slot) << " in "
-            << super_device;
   return true;
 }
 

@@ -33,6 +33,7 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   bool MapPartitionOnDeviceMapper(const std::string& super_device,
                                   const std::string& target_partition_name,
                                   uint32_t slot,
+                                  bool force_writable,
                                   std::string* path) override;
   bool UnmapPartitionOnDeviceMapper(const std::string& target_partition_name,
                                     bool wait) override;
@@ -42,7 +43,9 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   bool GetDmDevicePathByName(const std::string& name,
                              std::string* path) override;
   std::unique_ptr<android::fs_mgr::MetadataBuilder> LoadMetadataBuilder(
-      const std::string& super_device, uint32_t source_slot) override;
+      const std::string& super_device,
+      uint32_t source_slot,
+      uint32_t target_slot) override;
   bool StoreMetadata(const std::string& super_device,
                      android::fs_mgr::MetadataBuilder* builder,
                      uint32_t target_slot) override;

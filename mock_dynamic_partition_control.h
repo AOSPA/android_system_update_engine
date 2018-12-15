@@ -27,17 +27,20 @@ namespace chromeos_update_engine {
 
 class MockDynamicPartitionControl : public DynamicPartitionControlInterface {
  public:
-  MOCK_METHOD4(
-      MapPartitionOnDeviceMapper,
-      bool(const std::string&, const std::string&, uint32_t, std::string*));
+  MOCK_METHOD5(MapPartitionOnDeviceMapper,
+               bool(const std::string&,
+                    const std::string&,
+                    uint32_t,
+                    bool,
+                    std::string*));
   MOCK_METHOD2(UnmapPartitionOnDeviceMapper, bool(const std::string&, bool));
   MOCK_METHOD0(Cleanup, void());
   MOCK_METHOD1(DeviceExists, bool(const std::string&));
   MOCK_METHOD1(GetState, ::android::dm::DmDeviceState(const std::string&));
   MOCK_METHOD2(GetDmDevicePathByName, bool(const std::string&, std::string*));
-  MOCK_METHOD2(LoadMetadataBuilder,
+  MOCK_METHOD3(LoadMetadataBuilder,
                std::unique_ptr<::android::fs_mgr::MetadataBuilder>(
-                   const std::string&, uint32_t));
+                   const std::string&, uint32_t, uint32_t));
   MOCK_METHOD3(StoreMetadata,
                bool(const std::string&,
                     android::fs_mgr::MetadataBuilder*,

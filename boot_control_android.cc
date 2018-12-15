@@ -18,9 +18,11 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include <base/bind.h>
 #include <base/logging.h>
+#include <base/strings/string_util.h>
 #include <bootloader_message/bootloader_message.h>
 #include <brillo/message_loops/message_loop.h>
 #include <fs_mgr.h>
@@ -31,17 +33,15 @@
 using std::string;
 
 using android::dm::DmDeviceState;
-using android::fs_mgr::MetadataBuilder;
 using android::fs_mgr::Partition;
-using android::fs_mgr::UpdatePartitionTable;
 using android::hardware::hidl_string;
 using android::hardware::Return;
 using android::hardware::boot::V1_0::BoolResult;
 using android::hardware::boot::V1_0::CommandResult;
 using android::hardware::boot::V1_0::IBootControl;
 using Slot = chromeos_update_engine::BootControlInterface::Slot;
-using PartitionSizes =
-    chromeos_update_engine::BootControlInterface::PartitionSizes;
+using PartitionMetadata =
+    chromeos_update_engine::BootControlInterface::PartitionMetadata;
 
 namespace {
 
@@ -105,6 +105,74 @@ bool BootControlAndroid::GetSuffix(Slot slot, string* suffix) const {
   return true;
 }
 
+namespace {
+
+enum class DynamicPartitionDeviceStatus {
+  SUCCESS,
+  ERROR,
+  TRY_STATIC,
+};
+
+DynamicPartitionDeviceStatus GetDynamicPartitionDevice(
+    DynamicPartitionControlInterface* dynamic_control,
+    const string& super_device,
+    const string& partition_name_suffix,
+    Slot slot,
+    string* device) {
+  if (!dynamic_control->IsDynamicPartitionsEnabled()) {
+    return DynamicPartitionDeviceStatus::TRY_STATIC;
+  }
+
+  auto builder = dynamic_control->LoadMetadataBuilder(
+      super_device, slot, BootControlInterface::kInvalidSlot);
+
+  if (builder == nullptr) {
+    LOG(ERROR) << "No metadata in slot "
+               << BootControlInterface::SlotName(slot);
+    return DynamicPartitionDeviceStatus::ERROR;
+  }
+
+  if (builder->FindPartition(partition_name_suffix) == nullptr) {
+    LOG(INFO) << partition_name_suffix
+              << " is not in super partition metadata.";
+    return DynamicPartitionDeviceStatus::TRY_STATIC;
+  }
+
+  DmDeviceState state = dynamic_control->GetState(partition_name_suffix);
+
+  if (state == DmDeviceState::ACTIVE) {
+    if (dynamic_control->GetDmDevicePathByName(partition_name_suffix, device)) {
+      LOG(INFO) << partition_name_suffix
+                << " is mapped on device mapper: " << *device;
+      return DynamicPartitionDeviceStatus::SUCCESS;
+    }
+    LOG(ERROR) << partition_name_suffix << " is mapped but path is unknown.";
+    return DynamicPartitionDeviceStatus::ERROR;
+  }
+
+  // DeltaPerformer calls InitPartitionMetadata before calling
+  // InstallPlan::LoadPartitionsFromSlots. After InitPartitionMetadata,
+  // the target partition must be re-mapped with force_writable == true.
+  // Hence, if it is not mapped, we assume it is a source partition and
+  // map it without force_writable.
+  if (state == DmDeviceState::INVALID) {
+    if (dynamic_control->MapPartitionOnDeviceMapper(super_device,
+                                                    partition_name_suffix,
+                                                    slot,
+                                                    false /* force_writable */,
+                                                    device)) {
+      return DynamicPartitionDeviceStatus::SUCCESS;
+    }
+    return DynamicPartitionDeviceStatus::ERROR;
+  }
+
+  LOG(ERROR) << partition_name_suffix
+             << " is mapped on device mapper but state is unknown: "
+             << static_cast<std::underlying_type_t<DmDeviceState>>(state);
+  return DynamicPartitionDeviceStatus::ERROR;
+}
+}  // namespace
+
 bool BootControlAndroid::GetPartitionDevice(const string& partition_name,
                                             Slot slot,
                                             string* device) const {
@@ -112,45 +180,31 @@ bool BootControlAndroid::GetPartitionDevice(const string& partition_name,
   if (!GetSuffix(slot, &suffix)) {
     return false;
   }
-
-  const string target_partition_name = partition_name + suffix;
-
-  // DeltaPerformer calls InitPartitionMetadata before calling
-  // InstallPlan::LoadPartitionsFromSlots. After InitPartitionMetadata,
-  // the partition must be re-mapped with force_writable == true. Hence,
-  // we only need to check device mapper.
-  if (dynamic_control_->IsDynamicPartitionsEnabled()) {
-    switch (dynamic_control_->GetState(target_partition_name)) {
-      case DmDeviceState::ACTIVE:
-        if (dynamic_control_->GetDmDevicePathByName(target_partition_name,
-                                                    device)) {
-          LOG(INFO) << target_partition_name
-                    << " is mapped on device mapper: " << *device;
-          return true;
-        }
-        LOG(ERROR) << target_partition_name
-                   << " is mapped but path is unknown.";
-        return false;
-
-      case DmDeviceState::INVALID:
-        // Try static partitions.
-        break;
-
-      case DmDeviceState::SUSPENDED:  // fallthrough
-      default:
-        LOG(ERROR) << target_partition_name
-                   << " is mapped on device mapper but state is unknown";
-        return false;
-    }
-  }
+  const string partition_name_suffix = partition_name + suffix;
 
   string device_dir_str;
   if (!dynamic_control_->GetDeviceDir(&device_dir_str)) {
     return false;
   }
+  base::FilePath device_dir(device_dir_str);
 
-  base::FilePath path =
-      base::FilePath(device_dir_str).Append(target_partition_name);
+  string super_device =
+      device_dir.Append(fs_mgr_get_super_partition_name(slot)).value();
+  switch (GetDynamicPartitionDevice(dynamic_control_.get(),
+                                    super_device,
+                                    partition_name_suffix,
+                                    slot,
+                                    device)) {
+    case DynamicPartitionDeviceStatus::SUCCESS:
+      return true;
+    case DynamicPartitionDeviceStatus::TRY_STATIC:
+      break;
+    case DynamicPartitionDeviceStatus::ERROR:  // fallthrough
+    default:
+      return false;
+  }
+
+  base::FilePath path = device_dir.Append(partition_name_suffix);
   if (!dynamic_control_->DeviceExists(path.value())) {
     LOG(ERROR) << "Device file " << path.value() << " does not exist.";
     return false;
@@ -225,167 +279,113 @@ bool BootControlAndroid::MarkBootSuccessfulAsync(
 
 namespace {
 
-// Resize |partition_name|_|slot| to the given |size|.
-bool ResizePartition(MetadataBuilder* builder,
-                     const string& target_partition_name,
-                     uint64_t size) {
-  Partition* partition = builder->FindPartition(target_partition_name);
-  if (partition == nullptr) {
-    LOG(ERROR) << "Cannot find " << target_partition_name << " in metadata.";
+bool InitPartitionMetadataInternal(
+    DynamicPartitionControlInterface* dynamic_control,
+    const string& source_device,
+    const string& target_device,
+    Slot source_slot,
+    Slot target_slot,
+    const string& target_suffix,
+    const PartitionMetadata& partition_metadata) {
+  auto builder = dynamic_control->LoadMetadataBuilder(
+      source_device, source_slot, target_slot);
+  if (builder == nullptr) {
+    // TODO(elsk): allow reconstructing metadata from partition_metadata
+    // in recovery sideload.
+    LOG(ERROR) << "No metadata at "
+               << BootControlInterface::SlotName(source_slot);
     return false;
   }
 
-  uint64_t old_size = partition->size();
-  const string action = "resize " + target_partition_name + " in super (" +
-                        std::to_string(old_size) + " -> " +
-                        std::to_string(size) + " bytes)";
-  if (!builder->ResizePartition(partition, size)) {
-    LOG(ERROR) << "Cannot " << action << "; see previous log messages.";
+  std::vector<string> groups = builder->ListGroups();
+  for (const auto& group_name : groups) {
+    if (base::EndsWith(
+            group_name, target_suffix, base::CompareCase::SENSITIVE)) {
+      LOG(INFO) << "Removing group " << group_name;
+      builder->RemoveGroupAndPartitions(group_name);
+    }
+  }
+
+  uint64_t total_size = 0;
+  for (const auto& group : partition_metadata.groups) {
+    total_size += group.size;
+  }
+
+  if (total_size > (builder->AllocatableSpace() / 2)) {
+    LOG(ERROR)
+        << "The maximum size of all groups with suffix " << target_suffix
+        << " (" << total_size
+        << ") has exceeded half of allocatable space for dynamic partitions "
+        << (builder->AllocatableSpace() / 2) << ".";
     return false;
   }
 
-  if (partition->size() != size) {
-    LOG(ERROR) << "Cannot " << action
-               << "; value is misaligned and partition should have been "
-               << partition->size();
-    return false;
+  for (const auto& group : partition_metadata.groups) {
+    auto group_name_suffix = group.name + target_suffix;
+    if (!builder->AddGroup(group_name_suffix, group.size)) {
+      LOG(ERROR) << "Cannot add group " << group_name_suffix << " with size "
+                 << group.size;
+      return false;
+    }
+    LOG(INFO) << "Added group " << group_name_suffix << " with size "
+              << group.size;
+
+    for (const auto& partition : group.partitions) {
+      auto partition_name_suffix = partition.name + target_suffix;
+      Partition* p = builder->AddPartition(
+          partition_name_suffix, group_name_suffix, LP_PARTITION_ATTR_READONLY);
+      if (!p) {
+        LOG(ERROR) << "Cannot add partition " << partition_name_suffix
+                   << " to group " << group_name_suffix;
+        return false;
+      }
+      if (!builder->ResizePartition(p, partition.size)) {
+        LOG(ERROR) << "Cannot resize partition " << partition_name_suffix
+                   << " to size " << partition.size << ". Not enough space?";
+        return false;
+      }
+      LOG(INFO) << "Added partition " << partition_name_suffix << " to group "
+                << group_name_suffix << " with size " << partition.size;
+    }
   }
 
-  LOG(INFO) << "Successfully " << action;
-
-  return true;
+  return dynamic_control->StoreMetadata(
+      target_device, builder.get(), target_slot);
 }
 
-bool ResizePartitions(DynamicPartitionControlInterface* dynamic_control,
-                      const string& super_device,
-                      Slot target_slot,
-                      const string& target_suffix,
-                      const PartitionSizes& logical_sizes,
-                      MetadataBuilder* builder) {
-  // Delete all extents to ensure that each partition has enough space to
-  // grow.
-  for (const auto& pair : logical_sizes) {
-    const string target_partition_name = pair.first + target_suffix;
-    if (builder->FindPartition(target_partition_name) == nullptr) {
-      // Use constant GUID because it is unused.
-      LOG(INFO) << "Adding partition " << target_partition_name << " to slot "
-                << BootControlInterface::SlotName(target_slot) << " in "
-                << super_device;
-      if (builder->AddPartition(target_partition_name,
-                                LP_PARTITION_ATTR_READONLY) == nullptr) {
-        LOG(ERROR) << "Cannot add partition " << target_partition_name;
+// Unmap all partitions, and remap partitions as writable.
+bool Remap(DynamicPartitionControlInterface* dynamic_control,
+           const string& target_device,
+           Slot target_slot,
+           const string& target_suffix,
+           const PartitionMetadata& partition_metadata) {
+  for (const auto& group : partition_metadata.groups) {
+    for (const auto& partition : group.partitions) {
+      if (!dynamic_control->UnmapPartitionOnDeviceMapper(
+              partition.name + target_suffix, true /* wait */)) {
+        return false;
+      }
+      if (partition.size == 0) {
+        continue;
+      }
+      string map_path;
+      if (!dynamic_control->MapPartitionOnDeviceMapper(
+              target_device,
+              partition.name + target_suffix,
+              target_slot,
+              true /* force writable */,
+              &map_path)) {
         return false;
       }
     }
-    if (!ResizePartition(builder, pair.first + target_suffix, 0 /* size */)) {
-      return false;
-    }
-  }
-
-  for (const auto& pair : logical_sizes) {
-    if (!ResizePartition(builder, pair.first + target_suffix, pair.second)) {
-      LOG(ERROR) << "Not enough space?";
-      return false;
-    }
-  }
-
-  if (!dynamic_control->StoreMetadata(super_device, builder, target_slot)) {
-    return false;
   }
   return true;
 }
 
-// Assume upgrading from slot A to B. A partition foo is considered dynamic
-// iff one of the following:
-// 1. foo_a exists as a dynamic partition (so it should continue to be a
-//    dynamic partition)
-// 2. foo_b does not exist as a static partition (in which case we may be
-//    adding a new partition).
-bool IsDynamicPartition(DynamicPartitionControlInterface* dynamic_control,
-                        const base::FilePath& device_dir,
-                        MetadataBuilder* source_metadata,
-                        const string& partition_name,
-                        const string& source_suffix,
-                        const string& target_suffix) {
-  bool dynamic_source_exist =
-      source_metadata->FindPartition(partition_name + source_suffix) != nullptr;
-  bool static_target_exist = dynamic_control->DeviceExists(
-      device_dir.Append(partition_name + target_suffix).value());
-
-  return dynamic_source_exist || !static_target_exist;
-}
-
-bool FilterPartitionSizes(DynamicPartitionControlInterface* dynamic_control,
-                          const base::FilePath& device_dir,
-                          const PartitionSizes& partition_sizes,
-                          MetadataBuilder* source_metadata,
-                          const string& source_suffix,
-                          const string& target_suffix,
-                          PartitionSizes* logical_sizes) {
-  for (const auto& pair : partition_sizes) {
-    if (!IsDynamicPartition(dynamic_control,
-                            device_dir,
-                            source_metadata,
-                            pair.first,
-                            source_suffix,
-                            target_suffix)) {
-      // In the future we can check static partition sizes, but skip for now.
-      LOG(INFO) << pair.first << " is static; assume its size is "
-                << pair.second << " bytes.";
-      continue;
-    }
-
-    logical_sizes->insert(pair);
-  }
-  return true;
-}
-
-// Return false if partition sizes are all correct in metadata slot
-// |target_slot|. If so, no need to resize. |logical_sizes| have format like
-// {vendor: size, ...}, and fail if a partition is not found.
-bool NeedResizePartitions(DynamicPartitionControlInterface* dynamic_control,
-                          const string& super_device,
-                          Slot target_slot,
-                          const string& suffix,
-                          const PartitionSizes& logical_sizes) {
-  auto target_metadata =
-      dynamic_control->LoadMetadataBuilder(super_device, target_slot);
-  if (target_metadata == nullptr) {
-    LOG(INFO) << "Metadata slot " << BootControlInterface::SlotName(target_slot)
-              << " in " << super_device
-              << " is corrupted; attempt to recover from source slot.";
-    return true;
-  }
-
-  for (const auto& pair : logical_sizes) {
-    Partition* partition = target_metadata->FindPartition(pair.first + suffix);
-    if (partition == nullptr) {
-      LOG(INFO) << "Cannot find " << pair.first << suffix << " at slot "
-                << BootControlInterface::SlotName(target_slot) << " in "
-                << super_device << ". Need to resize.";
-      return true;
-    }
-    if (partition->size() != pair.second) {
-      LOG(INFO) << super_device << ":"
-                << BootControlInterface::SlotName(target_slot) << ":"
-                << pair.first << suffix << ": size == " << partition->size()
-                << " but requested " << pair.second << ". Need to resize.";
-      return true;
-    }
-    LOG(INFO) << super_device << ":"
-              << BootControlInterface::SlotName(target_slot) << ":"
-              << pair.first << suffix << ": size == " << partition->size()
-              << " as requested.";
-  }
-  LOG(INFO) << "No need to resize at metadata slot "
-            << BootControlInterface::SlotName(target_slot) << " in "
-            << super_device;
-  return false;
-}
 }  // namespace
 
 bool BootControlAndroid::InitPartitionMetadata(
-    Slot target_slot, const PartitionSizes& partition_sizes) {
+    Slot target_slot, const PartitionMetadata& partition_metadata) {
   if (!dynamic_control_->IsDynamicPartitionsEnabled()) {
     return true;
   }
@@ -395,77 +395,40 @@ bool BootControlAndroid::InitPartitionMetadata(
     return false;
   }
   base::FilePath device_dir(device_dir_str);
-  string super_device =
-      device_dir.Append(fs_mgr_get_super_partition_name()).value();
+  string target_device =
+      device_dir.Append(fs_mgr_get_super_partition_name(target_slot)).value();
 
   Slot current_slot = GetCurrentSlot();
   if (target_slot == current_slot) {
     LOG(ERROR) << "Cannot call InitPartitionMetadata on current slot.";
     return false;
   }
-
-  string current_suffix;
-  if (!GetSuffix(current_slot, &current_suffix)) {
-    return false;
-  }
+  string source_device =
+      device_dir.Append(fs_mgr_get_super_partition_name(current_slot)).value();
 
   string target_suffix;
   if (!GetSuffix(target_slot, &target_suffix)) {
     return false;
   }
 
-  auto builder =
-      dynamic_control_->LoadMetadataBuilder(super_device, current_slot);
-  if (builder == nullptr) {
+  if (!InitPartitionMetadataInternal(dynamic_control_.get(),
+                                     source_device,
+                                     target_device,
+                                     current_slot,
+                                     target_slot,
+                                     target_suffix,
+                                     partition_metadata)) {
     return false;
   }
 
-  // Read metadata from current slot to determine which partitions are logical
-  // and may be resized. Do not read from target slot because metadata at
-  // target slot may be corrupted.
-  PartitionSizes logical_sizes;
-  if (!FilterPartitionSizes(dynamic_control_.get(),
-                            device_dir,
-                            partition_sizes,
-                            builder.get() /* source metadata */,
-                            current_suffix,
-                            target_suffix,
-                            &logical_sizes)) {
+  if (!Remap(dynamic_control_.get(),
+             target_device,
+             target_slot,
+             target_suffix,
+             partition_metadata)) {
     return false;
   }
 
-  // Read metadata from target slot to determine if the sizes are correct. Only
-  // test logical partitions.
-  if (NeedResizePartitions(dynamic_control_.get(),
-                           super_device,
-                           target_slot,
-                           target_suffix,
-                           logical_sizes)) {
-    if (!ResizePartitions(dynamic_control_.get(),
-                          super_device,
-                          target_slot,
-                          target_suffix,
-                          logical_sizes,
-                          builder.get())) {
-      return false;
-    }
-  }
-
-  // Unmap all partitions, and remap partitions if size is non-zero.
-  for (const auto& pair : logical_sizes) {
-    if (!dynamic_control_->UnmapPartitionOnDeviceMapper(
-            pair.first + target_suffix, true /* wait */)) {
-      return false;
-    }
-    if (pair.second == 0) {
-      continue;
-    }
-    string map_path;
-    if (!dynamic_control_->MapPartitionOnDeviceMapper(
-            super_device, pair.first + target_suffix, target_slot, &map_path)) {
-      return false;
-    }
-  }
   return true;
 }
 
