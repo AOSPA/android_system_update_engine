@@ -387,17 +387,18 @@ bool DeltaReadPartition(vector<AnnotatedOperation>* aops,
     new_visited_blocks.AddExtent(new_part.verity.fec_extent);
   }
 
-  TEST_AND_RETURN_FALSE(DeltaMovedAndZeroBlocks(
-      aops,
-      old_part.path,
-      new_part.path,
-      old_part.size / kBlockSize,
-      new_part.size / kBlockSize,
-      soft_chunk_blocks,
-      version,
-      blob_file,
-      &old_visited_blocks,
-      &new_visited_blocks));
+  ExtentRanges old_zero_blocks;
+  TEST_AND_RETURN_FALSE(DeltaMovedAndZeroBlocks(aops,
+                                                old_part.path,
+                                                new_part.path,
+                                                old_part.size / kBlockSize,
+                                                new_part.size / kBlockSize,
+                                                soft_chunk_blocks,
+                                                version,
+                                                blob_file,
+                                                &old_visited_blocks,
+                                                &new_visited_blocks,
+                                                &old_zero_blocks));
 
   bool puffdiff_allowed = version.OperationAllowed(InstallOperation::PUFFDIFF);
   map<string, FilesystemInterface::File> old_files_map;
@@ -450,7 +451,7 @@ bool DeltaReadPartition(vector<AnnotatedOperation>* aops,
       old_file_extents =
           FilterExtentRanges(old_file.extents, old_visited_blocks);
     else
-      old_file_extents = old_file.extents;
+      old_file_extents = FilterExtentRanges(old_file.extents, old_zero_blocks);
     old_visited_blocks.AddExtents(old_file_extents);
 
     file_delta_processors.emplace_back(old_part.path,
@@ -527,7 +528,8 @@ bool DeltaMovedAndZeroBlocks(vector<AnnotatedOperation>* aops,
                              const PayloadVersion& version,
                              BlobFileWriter* blob_file,
                              ExtentRanges* old_visited_blocks,
-                             ExtentRanges* new_visited_blocks) {
+                             ExtentRanges* new_visited_blocks,
+                             ExtentRanges* old_zero_blocks) {
   vector<BlockMapping::BlockId> old_block_ids;
   vector<BlockMapping::BlockId> new_block_ids;
   TEST_AND_RETURN_FALSE(MapPartitionBlocks(old_part,
@@ -567,8 +569,9 @@ bool DeltaMovedAndZeroBlocks(vector<AnnotatedOperation>* aops,
     // importantly, these could sometimes be blocks discarded in the SSD which
     // would read non-zero values.
     if (old_block_ids[block] == 0)
-      old_visited_blocks->AddBlock(block);
+      old_zero_blocks->AddBlock(block);
   }
+  old_visited_blocks->AddRanges(*old_zero_blocks);
 
   // The collection of blocks in the new partition with just zeros. This is a
   // common case for free-space that's also problematic for bsdiff, so we want
@@ -933,6 +936,15 @@ bool ReadExtentsToDiff(const string& old_part,
 
         puffin::RemoveEqualBitExtents(
             old_data, new_data, &src_deflates, &dst_deflates);
+
+        // See crbug.com/915559.
+        if (version.minor <= kPuffdiffMinorPayloadVersion) {
+          TEST_AND_RETURN_FALSE(puffin::RemoveDeflatesWithBadDistanceCaches(
+              old_data, &src_deflates));
+
+          TEST_AND_RETURN_FALSE(puffin::RemoveDeflatesWithBadDistanceCaches(
+              new_data, &dst_deflates));
+        }
 
         // Only Puffdiff if both files have at least one deflate left.
         if (!src_deflates.empty() && !dst_deflates.empty()) {

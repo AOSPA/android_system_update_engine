@@ -26,6 +26,7 @@
 #include <bootloader_message/bootloader_message.h>
 #include <brillo/message_loops/message_loop.h>
 #include <fs_mgr.h>
+#include <fs_mgr_overlayfs.h>
 
 #include "update_engine/common/utils.h"
 #include "update_engine/dynamic_partition_control_android.h"
@@ -122,10 +123,6 @@ BootControlAndroid::GetDynamicPartitionDevice(
     const string& partition_name_suffix,
     Slot slot,
     string* device) const {
-  if (!dynamic_control_->IsDynamicPartitionsEnabled()) {
-    return DynamicPartitionDeviceStatus::TRY_STATIC;
-  }
-
   string super_device =
       device_dir.Append(fs_mgr_get_super_partition_name(slot)).value();
 
@@ -157,6 +154,8 @@ BootControlAndroid::GetDynamicPartitionDevice(
 
   DmDeviceState state = dynamic_control_->GetState(partition_name_suffix);
 
+  // Device is mapped in the previous GetPartitionDevice() call. Just return
+  // the path.
   if (state == DmDeviceState::ACTIVE) {
     if (dynamic_control_->GetDmDevicePathByName(partition_name_suffix,
                                                 device)) {
@@ -168,16 +167,12 @@ BootControlAndroid::GetDynamicPartitionDevice(
     return DynamicPartitionDeviceStatus::ERROR;
   }
 
-  // DeltaPerformer calls InitPartitionMetadata before calling
-  // InstallPlan::LoadPartitionsFromSlots. After InitPartitionMetadata,
-  // the target partition must be re-mapped with force_writable == true.
-  // Hence, if it is not mapped, we assume it is a source partition and
-  // map it without force_writable.
   if (state == DmDeviceState::INVALID) {
+    bool force_writable = slot != GetCurrentSlot();
     if (dynamic_control_->MapPartitionOnDeviceMapper(super_device,
                                                      partition_name_suffix,
                                                      slot,
-                                                     false /* force_writable */,
+                                                     force_writable,
                                                      device)) {
       return DynamicPartitionDeviceStatus::SUCCESS;
     }
@@ -205,15 +200,22 @@ bool BootControlAndroid::GetPartitionDevice(const string& partition_name,
   }
   base::FilePath device_dir(device_dir_str);
 
-  switch (GetDynamicPartitionDevice(
-      device_dir, partition_name_suffix, slot, device)) {
-    case DynamicPartitionDeviceStatus::SUCCESS:
-      return true;
-    case DynamicPartitionDeviceStatus::TRY_STATIC:
-      break;
-    case DynamicPartitionDeviceStatus::ERROR:  // fallthrough
-    default:
-      return false;
+  // When looking up target partition devices, treat them as static if the
+  // current payload doesn't encode them as dynamic partitions. This may happen
+  // when applying a retrofit update on top of a dynamic-partitions-enabled
+  // build.
+  if (dynamic_control_->IsDynamicPartitionsEnabled() &&
+      (slot == GetCurrentSlot() || is_target_dynamic_)) {
+    switch (GetDynamicPartitionDevice(
+        device_dir, partition_name_suffix, slot, device)) {
+      case DynamicPartitionDeviceStatus::SUCCESS:
+        return true;
+      case DynamicPartitionDeviceStatus::TRY_STATIC:
+        break;
+      case DynamicPartitionDeviceStatus::ERROR:  // fallthrough
+      default:
+        return false;
+    }
   }
 
   base::FilePath path = device_dir.Append(partition_name_suffix);
@@ -291,14 +293,19 @@ bool BootControlAndroid::MarkBootSuccessfulAsync(
 
 namespace {
 
-bool InitPartitionMetadataInternal(
-    DynamicPartitionControlInterface* dynamic_control,
-    const string& source_device,
-    const string& target_device,
-    Slot source_slot,
-    Slot target_slot,
-    const string& target_suffix,
-    const PartitionMetadata& partition_metadata) {
+bool UpdatePartitionMetadata(DynamicPartitionControlInterface* dynamic_control,
+                             Slot source_slot,
+                             Slot target_slot,
+                             const string& target_suffix,
+                             const PartitionMetadata& partition_metadata) {
+  string device_dir_str;
+  if (!dynamic_control->GetDeviceDir(&device_dir_str)) {
+    return false;
+  }
+  base::FilePath device_dir(device_dir_str);
+  auto source_device =
+      device_dir.Append(fs_mgr_get_super_partition_name(source_slot)).value();
+
   auto builder = dynamic_control->LoadMetadataBuilder(
       source_device, source_slot, target_slot);
   if (builder == nullptr) {
@@ -332,7 +339,7 @@ bool InitPartitionMetadataInternal(
   if (total_size > allocatable_space) {
     LOG(ERROR) << "The maximum size of all groups with suffix " << target_suffix
                << " (" << total_size << ") has exceeded " << expr
-               << "allocatable space for dynamic partitions "
+               << " allocatable space for dynamic partitions "
                << allocatable_space << ".";
     return false;
   }
@@ -366,32 +373,19 @@ bool InitPartitionMetadataInternal(
     }
   }
 
+  auto target_device =
+      device_dir.Append(fs_mgr_get_super_partition_name(target_slot)).value();
   return dynamic_control->StoreMetadata(
       target_device, builder.get(), target_slot);
 }
 
-// Unmap all partitions, and remap partitions as writable.
-bool Remap(DynamicPartitionControlInterface* dynamic_control,
-           const string& target_device,
-           Slot target_slot,
-           const string& target_suffix,
-           const PartitionMetadata& partition_metadata) {
+bool UnmapTargetPartitions(DynamicPartitionControlInterface* dynamic_control,
+                           const string& target_suffix,
+                           const PartitionMetadata& partition_metadata) {
   for (const auto& group : partition_metadata.groups) {
     for (const auto& partition : group.partitions) {
       if (!dynamic_control->UnmapPartitionOnDeviceMapper(
               partition.name + target_suffix, true /* wait */)) {
-        return false;
-      }
-      if (partition.size == 0) {
-        continue;
-      }
-      string map_path;
-      if (!dynamic_control->MapPartitionOnDeviceMapper(
-              target_device,
-              partition.name + target_suffix,
-              target_slot,
-              true /* force writable */,
-              &map_path)) {
         return false;
       }
     }
@@ -402,51 +396,55 @@ bool Remap(DynamicPartitionControlInterface* dynamic_control,
 }  // namespace
 
 bool BootControlAndroid::InitPartitionMetadata(
-    Slot target_slot, const PartitionMetadata& partition_metadata) {
+    Slot target_slot,
+    const PartitionMetadata& partition_metadata,
+    bool update_metadata) {
+  if (fs_mgr_overlayfs_is_setup()) {
+    // Non DAP devices can use overlayfs as well.
+    LOG(WARNING)
+        << "overlayfs overrides are active and can interfere with our "
+           "resources.\n"
+        << "run adb enable-verity to deactivate if required and try again.";
+  }
   if (!dynamic_control_->IsDynamicPartitionsEnabled()) {
     return true;
   }
 
-  string device_dir_str;
-  if (!dynamic_control_->GetDeviceDir(&device_dir_str)) {
-    return false;
-  }
-  base::FilePath device_dir(device_dir_str);
-  string target_device =
-      device_dir.Append(fs_mgr_get_super_partition_name(target_slot)).value();
-
-  Slot current_slot = GetCurrentSlot();
-  if (target_slot == current_slot) {
+  auto source_slot = GetCurrentSlot();
+  if (target_slot == source_slot) {
     LOG(ERROR) << "Cannot call InitPartitionMetadata on current slot.";
     return false;
   }
-  string source_device =
-      device_dir.Append(fs_mgr_get_super_partition_name(current_slot)).value();
+
+  // Although the current build supports dynamic partitions, the given payload
+  // doesn't use it for target partitions. This could happen when applying a
+  // retrofit update. Skip updating the partition metadata for the target slot.
+  is_target_dynamic_ = !partition_metadata.groups.empty();
+  if (!is_target_dynamic_) {
+    return true;
+  }
+
+  if (!update_metadata) {
+    return true;
+  }
 
   string target_suffix;
   if (!GetSuffix(target_slot, &target_suffix)) {
     return false;
   }
 
-  if (!InitPartitionMetadataInternal(dynamic_control_.get(),
-                                     source_device,
-                                     target_device,
-                                     current_slot,
-                                     target_slot,
-                                     target_suffix,
-                                     partition_metadata)) {
+  // Unmap all the target dynamic partitions because they would become
+  // inconsistent with the new metadata.
+  if (!UnmapTargetPartitions(
+          dynamic_control_.get(), target_suffix, partition_metadata)) {
     return false;
   }
 
-  if (!Remap(dynamic_control_.get(),
-             target_device,
-             target_slot,
-             target_suffix,
-             partition_metadata)) {
-    return false;
-  }
-
-  return true;
+  return UpdatePartitionMetadata(dynamic_control_.get(),
+                                 source_slot,
+                                 target_slot,
+                                 target_suffix,
+                                 partition_metadata);
 }
 
 }  // namespace chromeos_update_engine
