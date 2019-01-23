@@ -44,11 +44,6 @@ namespace chromeos_update_engine {
 
 namespace utils {
 
-// Converts a struct timespec representing a number of seconds since
-// the Unix epoch to a base::Time. Sub-microsecond time is rounded
-// down.
-base::Time TimeFromStructTimespec(struct timespec *ts);
-
 // Formats |vec_str| as a string of the form ["<elem1>", "<elem2>"].
 // Does no escaping, only use this for presentation in error messages.
 std::string StringVectorToString(const std::vector<std::string> &vec_str);
@@ -131,13 +126,6 @@ bool IsSymlink(const char* path);
 // commands to attach the volume, this function returns false. This function
 // only returns true if "/dev/ubi%d_0" becomes available in |timeout| seconds.
 bool TryAttachingUbiVolume(int volume_num, int timeout);
-
-// Setup the directory |new_root_temp_dir| to be used as the root directory for
-// temporary files instead of the system's default. If the directory doesn't
-// exists, it will be created when first used.
-// NOTE: The memory pointed by |new_root_temp_dir| must be available until this
-// function is called again with a different value.
-void SetRootTempDir(const char* new_root_temp_dir);
 
 // If |base_filename_template| is neither absolute (starts with "/") nor
 // explicitly relative to the current working directory (starts with "./" or
@@ -275,14 +263,6 @@ std::string FormatTimeDelta(base::TimeDelta delta);
 // it'll return the same value again.
 ErrorCode GetBaseErrorCode(ErrorCode code);
 
-// Decodes the data in |base64_encoded| and stores it in a temporary
-// file. Returns false if the given data is empty, not well-formed
-// base64 or if an error occurred. If true is returned, the decoded
-// data is stored in the file returned in |out_path|. The file should
-// be deleted when no longer needed.
-bool DecodeAndStoreBase64String(const std::string& base64_encoded,
-                                base::FilePath *out_path);
-
 // Converts |time| to an Omaha InstallDate which is defined as "the
 // number of PST8PDT calendar weeks since Jan 1st 2007 0:00 PST, times
 // seven" with PST8PDT defined as "Pacific Time" (e.g. UTC-07:00 if
@@ -386,7 +366,9 @@ class ScopedActionCompleter {
       : processor_(processor),
         action_(action),
         code_(ErrorCode::kError),
-        should_complete_(true) {}
+        should_complete_(true) {
+    CHECK(processor_);
+  }
   ~ScopedActionCompleter() {
     if (should_complete_)
       processor_->ActionComplete(action_, code_);
