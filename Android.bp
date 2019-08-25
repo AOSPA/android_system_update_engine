@@ -214,6 +214,7 @@ cc_library_static {
     srcs: [
         "boot_control_android.cc",
         "dynamic_partition_control_android.cc",
+        "dynamic_partition_utils.cc",
     ],
 }
 
@@ -245,6 +246,7 @@ cc_defaults {
         "liblog",
         "libmetricslogger",
         "libssl",
+        "libstatslog",
         "libutils",
     ],
 }
@@ -370,7 +372,6 @@ cc_binary {
     },
 
     required: [
-        "android.hardware.boot@1.0-impl-wrapper.recovery",
         "update_engine_payload_key.recovery",
     ],
 }
@@ -406,13 +407,21 @@ cc_library_shared {
     ],
 
     srcs: [
-        "binder_bindings/android/brillo/IUpdateEngine.aidl",
-        "binder_bindings/android/brillo/IUpdateEngineStatusCallback.aidl",
+        ":libupdate_engine_client_aidl",
         "client_library/client.cc",
         "client_library/client_binder.cc",
         "parcelable_update_engine_status.cc",
         "update_status_utils.cc",
     ],
+}
+
+filegroup {
+    name: "libupdate_engine_client_aidl",
+    srcs: [
+        "binder_bindings/android/brillo/IUpdateEngine.aidl",
+        "binder_bindings/android/brillo/IUpdateEngineStatusCallback.aidl",
+    ],
+    path: "binder_bindings",
 }
 
 // update_engine_client (type: executable)
@@ -670,6 +679,7 @@ cc_test {
         "common/terminator_unittest.cc",
         "common/test_utils.cc",
         "common/utils_unittest.cc",
+        "dynamic_partition_control_android_unittest.cc",
         "payload_consumer/bzip_extent_writer_unittest.cc",
         "payload_consumer/cached_file_descriptor_unittest.cc",
         "payload_consumer/delta_performer_integration_test.cc",
