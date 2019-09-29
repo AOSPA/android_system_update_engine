@@ -19,27 +19,36 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <vector>
 
 #include <android-base/properties.h>
 #include <android-base/strings.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/strings/string_util.h>
 #include <bootloader_message/bootloader_message.h>
+#include <fs_mgr.h>
 #include <fs_mgr_dm_linear.h>
 
 #include "update_engine/common/boot_control_interface.h"
 #include "update_engine/common/utils.h"
+#include "update_engine/dynamic_partition_utils.h"
 
 using android::base::GetBoolProperty;
 using android::base::Join;
 using android::dm::DeviceMapper;
 using android::dm::DmDeviceState;
 using android::fs_mgr::CreateLogicalPartition;
+using android::fs_mgr::CreateLogicalPartitionParams;
 using android::fs_mgr::DestroyLogicalPartition;
 using android::fs_mgr::MetadataBuilder;
+using android::fs_mgr::Partition;
 using android::fs_mgr::PartitionOpener;
+using android::fs_mgr::SlotSuffixForSlotNumber;
 
 namespace chromeos_update_engine {
+
+using PartitionMetadata = BootControlInterface::PartitionMetadata;
 
 constexpr char kUseDynamicPartitions[] = "ro.boot.dynamic_partitions";
 constexpr char kRetrfoitDynamicPartitions[] =
@@ -50,12 +59,26 @@ DynamicPartitionControlAndroid::~DynamicPartitionControlAndroid() {
   CleanupInternal(false /* wait */);
 }
 
-bool DynamicPartitionControlAndroid::IsDynamicPartitionsEnabled() {
-  return GetBoolProperty(kUseDynamicPartitions, false);
+static FeatureFlag GetFeatureFlag(const char* enable_prop,
+                                  const char* retrofit_prop) {
+  bool retrofit = GetBoolProperty(retrofit_prop, false);
+  bool enabled = GetBoolProperty(enable_prop, false);
+  if (retrofit && !enabled) {
+    LOG(ERROR) << retrofit_prop << " is true but " << enable_prop
+               << " is not. These sysprops are inconsistent. Assume that "
+               << enable_prop << " is true from now on.";
+  }
+  if (retrofit) {
+    return FeatureFlag(FeatureFlag::Value::RETROFIT);
+  }
+  if (enabled) {
+    return FeatureFlag(FeatureFlag::Value::LAUNCH);
+  }
+  return FeatureFlag(FeatureFlag::Value::NONE);
 }
 
-bool DynamicPartitionControlAndroid::IsDynamicPartitionsRetrofit() {
-  return GetBoolProperty(kRetrfoitDynamicPartitions, false);
+FeatureFlag DynamicPartitionControlAndroid::GetDynamicPartitionsFeatureFlag() {
+  return GetFeatureFlag(kUseDynamicPartitions, kRetrfoitDynamicPartitions);
 }
 
 bool DynamicPartitionControlAndroid::MapPartitionInternal(
@@ -64,12 +87,15 @@ bool DynamicPartitionControlAndroid::MapPartitionInternal(
     uint32_t slot,
     bool force_writable,
     std::string* path) {
-  if (!CreateLogicalPartition(super_device.c_str(),
-                              slot,
-                              target_partition_name,
-                              force_writable,
-                              std::chrono::milliseconds(kMapTimeoutMillis),
-                              path)) {
+  CreateLogicalPartitionParams params = {
+      .block_device = super_device,
+      .metadata_slot = slot,
+      .partition_name = target_partition_name,
+      .force_writable = force_writable,
+      .timeout_ms = std::chrono::milliseconds(kMapTimeoutMillis),
+  };
+
+  if (!CreateLogicalPartition(params, path)) {
     LOG(ERROR) << "Cannot map " << target_partition_name << " in "
                << super_device << " on device mapper.";
     return false;
@@ -103,7 +129,7 @@ bool DynamicPartitionControlAndroid::MapPartitionOnDeviceMapper(
     // Note that for source partitions, if GetState() == ACTIVE, callers (e.g.
     // BootControlAndroid) should not call MapPartitionOnDeviceMapper, but
     // should directly call GetDmDevicePathByName.
-    if (!UnmapPartitionOnDeviceMapper(target_partition_name, true /* wait */)) {
+    if (!UnmapPartitionOnDeviceMapper(target_partition_name)) {
       LOG(ERROR) << target_partition_name
                  << " is mapped before the update, and it cannot be unmapped.";
       return false;
@@ -127,12 +153,10 @@ bool DynamicPartitionControlAndroid::MapPartitionOnDeviceMapper(
 }
 
 bool DynamicPartitionControlAndroid::UnmapPartitionOnDeviceMapper(
-    const std::string& target_partition_name, bool wait) {
+    const std::string& target_partition_name) {
   if (DeviceMapper::Instance().GetState(target_partition_name) !=
       DmDeviceState::INVALID) {
-    if (!DestroyLogicalPartition(
-            target_partition_name,
-            std::chrono::milliseconds(wait ? kMapTimeoutMillis : 0))) {
+    if (!DestroyLogicalPartition(target_partition_name)) {
       LOG(ERROR) << "Cannot unmap " << target_partition_name
                  << " from device mapper.";
       return false;
@@ -145,12 +169,15 @@ bool DynamicPartitionControlAndroid::UnmapPartitionOnDeviceMapper(
 }
 
 void DynamicPartitionControlAndroid::CleanupInternal(bool wait) {
+  if (mapped_devices_.empty()) {
+    return;
+  }
   // UnmapPartitionOnDeviceMapper removes objects from mapped_devices_, hence
   // a copy is needed for the loop.
   std::set<std::string> mapped = mapped_devices_;
   LOG(INFO) << "Destroying [" << Join(mapped, ", ") << "] from device mapper";
   for (const auto& partition_name : mapped) {
-    ignore_result(UnmapPartitionOnDeviceMapper(partition_name, wait));
+    ignore_result(UnmapPartitionOnDeviceMapper(partition_name));
   }
 }
 
@@ -174,18 +201,23 @@ bool DynamicPartitionControlAndroid::GetDmDevicePathByName(
 
 std::unique_ptr<MetadataBuilder>
 DynamicPartitionControlAndroid::LoadMetadataBuilder(
+    const std::string& super_device, uint32_t source_slot) {
+  return LoadMetadataBuilder(
+      super_device, source_slot, BootControlInterface::kInvalidSlot);
+}
+
+std::unique_ptr<MetadataBuilder>
+DynamicPartitionControlAndroid::LoadMetadataBuilder(
     const std::string& super_device,
     uint32_t source_slot,
     uint32_t target_slot) {
   std::unique_ptr<MetadataBuilder> builder;
-
-  if (target_slot != BootControlInterface::kInvalidSlot &&
-      IsDynamicPartitionsRetrofit()) {
-    builder = MetadataBuilder::NewForUpdate(
-        PartitionOpener(), super_device, source_slot, target_slot);
-  } else {
+  if (target_slot == BootControlInterface::kInvalidSlot) {
     builder =
         MetadataBuilder::New(PartitionOpener(), super_device, source_slot);
+  } else {
+    builder = MetadataBuilder::NewForUpdate(
+        PartitionOpener(), super_device, source_slot, target_slot);
   }
 
   if (builder == nullptr) {
@@ -212,7 +244,7 @@ bool DynamicPartitionControlAndroid::StoreMetadata(
     return false;
   }
 
-  if (IsDynamicPartitionsRetrofit()) {
+  if (GetDynamicPartitionsFeatureFlag().IsRetrofit()) {
     if (!FlashPartitionTable(super_device, *metadata)) {
       LOG(ERROR) << "Cannot write metadata to " << super_device;
       return false;
@@ -267,4 +299,109 @@ bool DynamicPartitionControlAndroid::GetDeviceDir(std::string* out) {
   *out = base::FilePath(misc_device).DirName().value();
   return true;
 }
+
+bool DynamicPartitionControlAndroid::PreparePartitionsForUpdate(
+    uint32_t source_slot,
+    uint32_t target_slot,
+    const PartitionMetadata& partition_metadata) {
+  const std::string target_suffix = SlotSuffixForSlotNumber(target_slot);
+
+  // Unmap all the target dynamic partitions because they would become
+  // inconsistent with the new metadata.
+  for (const auto& group : partition_metadata.groups) {
+    for (const auto& partition : group.partitions) {
+      if (!UnmapPartitionOnDeviceMapper(partition.name + target_suffix)) {
+        return false;
+      }
+    }
+  }
+
+  std::string device_dir_str;
+  if (!GetDeviceDir(&device_dir_str)) {
+    return false;
+  }
+  base::FilePath device_dir(device_dir_str);
+  auto source_device =
+      device_dir.Append(GetSuperPartitionName(source_slot)).value();
+
+  auto builder = LoadMetadataBuilder(source_device, source_slot, target_slot);
+  if (builder == nullptr) {
+    LOG(ERROR) << "No metadata at "
+               << BootControlInterface::SlotName(source_slot);
+    return false;
+  }
+
+  if (!UpdatePartitionMetadata(
+          builder.get(), target_slot, partition_metadata)) {
+    return false;
+  }
+
+  auto target_device =
+      device_dir.Append(GetSuperPartitionName(target_slot)).value();
+  return StoreMetadata(target_device, builder.get(), target_slot);
+}
+
+std::string DynamicPartitionControlAndroid::GetSuperPartitionName(
+    uint32_t slot) {
+  return fs_mgr_get_super_partition_name(slot);
+}
+
+bool DynamicPartitionControlAndroid::UpdatePartitionMetadata(
+    MetadataBuilder* builder,
+    uint32_t target_slot,
+    const PartitionMetadata& partition_metadata) {
+  const std::string target_suffix = SlotSuffixForSlotNumber(target_slot);
+  DeleteGroupsWithSuffix(builder, target_suffix);
+
+  uint64_t total_size = 0;
+  for (const auto& group : partition_metadata.groups) {
+    total_size += group.size;
+  }
+
+  std::string expr;
+  uint64_t allocatable_space = builder->AllocatableSpace();
+  if (!GetDynamicPartitionsFeatureFlag().IsRetrofit()) {
+    allocatable_space /= 2;
+    expr = "half of ";
+  }
+  if (total_size > allocatable_space) {
+    LOG(ERROR) << "The maximum size of all groups with suffix " << target_suffix
+               << " (" << total_size << ") has exceeded " << expr
+               << "allocatable space for dynamic partitions "
+               << allocatable_space << ".";
+    return false;
+  }
+
+  for (const auto& group : partition_metadata.groups) {
+    auto group_name_suffix = group.name + target_suffix;
+    if (!builder->AddGroup(group_name_suffix, group.size)) {
+      LOG(ERROR) << "Cannot add group " << group_name_suffix << " with size "
+                 << group.size;
+      return false;
+    }
+    LOG(INFO) << "Added group " << group_name_suffix << " with size "
+              << group.size;
+
+    for (const auto& partition : group.partitions) {
+      auto partition_name_suffix = partition.name + target_suffix;
+      Partition* p = builder->AddPartition(
+          partition_name_suffix, group_name_suffix, LP_PARTITION_ATTR_READONLY);
+      if (!p) {
+        LOG(ERROR) << "Cannot add partition " << partition_name_suffix
+                   << " to group " << group_name_suffix;
+        return false;
+      }
+      if (!builder->ResizePartition(p, partition.size)) {
+        LOG(ERROR) << "Cannot resize partition " << partition_name_suffix
+                   << " to size " << partition.size << ". Not enough space?";
+        return false;
+      }
+      LOG(INFO) << "Added partition " << partition_name_suffix << " to group "
+                << group_name_suffix << " with size " << partition.size;
+    }
+  }
+
+  return true;
+}
+
 }  // namespace chromeos_update_engine
