@@ -46,6 +46,7 @@
 #include "update_engine/common/terminator.h"
 #include "update_engine/payload_consumer/bzip_extent_writer.h"
 #include "update_engine/payload_consumer/cached_file_descriptor.h"
+#include "update_engine/payload_consumer/certificate_parser_interface.h"
 #include "update_engine/payload_consumer/download_action.h"
 #include "update_engine/payload_consumer/extent_reader.h"
 #include "update_engine/payload_consumer/extent_writer.h"
@@ -526,17 +527,19 @@ MetadataParseResult DeltaPerformer::ParsePayloadMetadata(
                  << "Trusting metadata size in payload = " << metadata_size_;
   }
 
-  string public_key;
-  if (!GetPublicKey(&public_key)) {
-    LOG(ERROR) << "Failed to get public key.";
+  auto [payload_verifier, perform_verification] = CreatePayloadVerifier();
+  if (!payload_verifier) {
+    LOG(ERROR) << "Failed to create payload verifier.";
     *error = ErrorCode::kDownloadMetadataSignatureVerificationError;
-    return MetadataParseResult::kError;
+    if (perform_verification) {
+      return MetadataParseResult::kError;
+    }
+  } else {
+    // We have the full metadata in |payload|. Verify its integrity
+    // and authenticity based on the information we have in Omaha response.
+    *error = payload_metadata_.ValidateMetadataSignature(
+        payload, payload_->metadata_signature, *payload_verifier);
   }
-
-  // We have the full metadata in |payload|. Verify its integrity
-  // and authenticity based on the information we have in Omaha response.
-  *error = payload_metadata_.ValidateMetadataSignature(
-      payload, payload_->metadata_signature, public_key);
   if (*error != ErrorCode::kSuccess) {
     if (install_plan_->hash_checks_mandatory) {
       // The autoupdate_CatchBadSignatures test checks for this string
@@ -808,7 +811,6 @@ bool DeltaPerformer::ParseManifestPartitions(ErrorCode* error) {
     for (const PartitionUpdate& partition : manifest_.partitions()) {
       partitions_.push_back(partition);
     }
-    manifest_.clear_partitions();
   } else if (major_payload_version_ == kChromeOSMajorPayloadVersion) {
     LOG(INFO) << "Converting update information from old format.";
     PartitionUpdate root_part;
@@ -923,10 +925,14 @@ bool DeltaPerformer::ParseManifestPartitions(ErrorCode* error) {
   }
 
   if (install_plan_->target_slot != BootControlInterface::kInvalidSlot) {
-    if (!InitPartitionMetadata()) {
+    if (!PreparePartitionsForUpdate()) {
       *error = ErrorCode::kInstallDeviceOpenError;
       return false;
     }
+  }
+
+  if (major_payload_version_ == kBrilloMajorPayloadVersion) {
+    manifest_.clear_partitions();
   }
 
   if (!install_plan_->LoadPartitionsFromSlots(boot_control_)) {
@@ -938,45 +944,18 @@ bool DeltaPerformer::ParseManifestPartitions(ErrorCode* error) {
   return true;
 }
 
-bool DeltaPerformer::InitPartitionMetadata() {
-  BootControlInterface::PartitionMetadata partition_metadata;
-  if (manifest_.has_dynamic_partition_metadata()) {
-    std::map<string, uint64_t> partition_sizes;
-    for (const auto& partition : install_plan_->partitions) {
-      partition_sizes.emplace(partition.name, partition.target_size);
-    }
-    for (const auto& group : manifest_.dynamic_partition_metadata().groups()) {
-      BootControlInterface::PartitionMetadata::Group e;
-      e.name = group.name();
-      e.size = group.size();
-      for (const auto& partition_name : group.partition_names()) {
-        auto it = partition_sizes.find(partition_name);
-        if (it == partition_sizes.end()) {
-          // TODO(tbao): Support auto-filling partition info for framework-only
-          // OTA.
-          LOG(ERROR) << "dynamic_partition_metadata contains partition "
-                     << partition_name
-                     << " but it is not part of the manifest. "
-                     << "This is not supported.";
-          return false;
-        }
-        e.partitions.push_back({partition_name, it->second});
-      }
-      partition_metadata.groups.push_back(std::move(e));
-    }
-  }
-
+bool DeltaPerformer::PreparePartitionsForUpdate() {
   bool metadata_updated = false;
   prefs_->GetBoolean(kPrefsDynamicPartitionMetadataUpdated, &metadata_updated);
-  if (!boot_control_->InitPartitionMetadata(
-          install_plan_->target_slot, partition_metadata, !metadata_updated)) {
+  if (!boot_control_->PreparePartitionsForUpdate(
+          install_plan_->target_slot, manifest_, !metadata_updated)) {
     LOG(ERROR) << "Unable to initialize partition metadata for slot "
                << BootControlInterface::SlotName(install_plan_->target_slot);
     return false;
   }
   TEST_AND_RETURN_FALSE(
       prefs_->SetBoolean(kPrefsDynamicPartitionMetadataUpdated, true));
-  LOG(INFO) << "InitPartitionMetadata done.";
+  LOG(INFO) << "PreparePartitionsForUpdate done.";
 
   return true;
 }
@@ -1620,8 +1599,30 @@ bool DeltaPerformer::GetPublicKey(string* out_public_key) {
     return brillo::data_encoding::Base64Decode(install_plan_->public_key_rsa,
                                                out_public_key);
   }
-
+  LOG(INFO) << "No public keys found for verification.";
   return true;
+}
+
+std::pair<std::unique_ptr<PayloadVerifier>, bool>
+DeltaPerformer::CreatePayloadVerifier() {
+  if (utils::FileExists(update_certificates_path_.c_str())) {
+    LOG(INFO) << "Verifying using certificates: " << update_certificates_path_;
+    return {
+        PayloadVerifier::CreateInstanceFromZipPath(update_certificates_path_),
+        true};
+  }
+
+  string public_key;
+  if (!GetPublicKey(&public_key)) {
+    LOG(ERROR) << "Failed to read public key";
+    return {nullptr, true};
+  }
+
+  // Skips the verification if the public key is empty.
+  if (public_key.empty()) {
+    return {nullptr, false};
+  }
+  return {PayloadVerifier::CreateInstance(public_key), true};
 }
 
 ErrorCode DeltaPerformer::ValidateManifest() {
@@ -1784,12 +1785,6 @@ ErrorCode DeltaPerformer::ValidateOperationHash(
 ErrorCode DeltaPerformer::VerifyPayload(
     const brillo::Blob& update_check_response_hash,
     const uint64_t update_check_response_size) {
-  string public_key;
-  if (!GetPublicKey(&public_key)) {
-    LOG(ERROR) << "Failed to get public key.";
-    return ErrorCode::kDownloadPayloadPubKeyVerificationError;
-  }
-
   // Verifies the download size.
   if (update_check_response_size !=
       metadata_size_ + metadata_signature_size_ + buffer_offset_) {
@@ -1807,19 +1802,22 @@ ErrorCode DeltaPerformer::VerifyPayload(
       ErrorCode::kPayloadHashMismatchError,
       payload_hash_calculator_.raw_hash() == update_check_response_hash);
 
-  // Verifies the signed payload hash.
-  if (public_key.empty()) {
-    LOG(WARNING) << "Not verifying signed delta payload -- missing public key.";
-    return ErrorCode::kSuccess;
-  }
   TEST_AND_RETURN_VAL(ErrorCode::kSignedDeltaPayloadExpectedError,
                       !signatures_message_data_.empty());
   brillo::Blob hash_data = signed_hash_calculator_.raw_hash();
   TEST_AND_RETURN_VAL(ErrorCode::kDownloadPayloadPubKeyVerificationError,
                       hash_data.size() == kSHA256Size);
 
-  if (!PayloadVerifier::VerifySignature(
-          signatures_message_data_, public_key, hash_data)) {
+  auto [payload_verifier, perform_verification] = CreatePayloadVerifier();
+  if (!perform_verification) {
+    LOG(WARNING) << "Not verifying signed delta payload -- missing public key.";
+    return ErrorCode::kSuccess;
+  }
+  if (!payload_verifier) {
+    LOG(ERROR) << "Failed to create the payload verifier.";
+    return ErrorCode::kDownloadPayloadPubKeyVerificationError;
+  }
+  if (!payload_verifier->VerifySignature(signatures_message_data_, hash_data)) {
     // The autoupdate_CatchBadSignatures test checks for this string
     // in log-files. Keep in sync.
     LOG(ERROR) << "Public key verification failed, thus update failed.";

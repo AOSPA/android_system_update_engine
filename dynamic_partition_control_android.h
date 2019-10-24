@@ -23,11 +23,13 @@
 #include <set>
 #include <string>
 
+#include <libsnapshot/snapshot.h>
+
 namespace chromeos_update_engine {
 
 class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
  public:
-  DynamicPartitionControlAndroid() = default;
+  DynamicPartitionControlAndroid();
   ~DynamicPartitionControlAndroid();
   FeatureFlag GetDynamicPartitionsFeatureFlag() override;
   FeatureFlag GetVirtualAbFeatureFlag() override;
@@ -46,10 +48,11 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
 
   bool PreparePartitionsForUpdate(uint32_t source_slot,
                                   uint32_t target_slot,
-                                  const BootControlInterface::PartitionMetadata&
-                                      partition_metadata) override;
+                                  const DeltaArchiveManifest& manifest,
+                                  bool update) override;
   bool GetDeviceDir(std::string* path) override;
   std::string GetSuperPartitionName(uint32_t slot) override;
+  bool FinishUpdate() override;
 
  protected:
   // These functions are exposed for testing.
@@ -83,8 +86,6 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
  private:
   friend class DynamicPartitionControlAndroidTest;
 
-  std::set<std::string> mapped_devices_;
-
   void CleanupInternal(bool wait);
   bool MapPartitionInternal(const std::string& super_device,
                             const std::string& target_partition_name,
@@ -94,10 +95,27 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
 
   // Update |builder| according to |partition_metadata|, assuming the device
   // does not have Virtual A/B.
-  bool UpdatePartitionMetadata(
-      android::fs_mgr::MetadataBuilder* builder,
-      uint32_t target_slot,
-      const BootControlInterface::PartitionMetadata& partition_metadata);
+  bool UpdatePartitionMetadata(android::fs_mgr::MetadataBuilder* builder,
+                               uint32_t target_slot,
+                               const DeltaArchiveManifest& manifest);
+
+  // Helper for PreparePartitionsForUpdate. Used for dynamic partitions without
+  // Virtual A/B update.
+  bool PrepareDynamicPartitionsForUpdate(uint32_t source_slot,
+                                         uint32_t target_slot,
+                                         const DeltaArchiveManifest& manifest);
+
+  // Helper for PreparePartitionsForUpdate. Used for snapshotted partitions for
+  // Virtual A/B update.
+  bool PrepareSnapshotPartitionsForUpdate(uint32_t source_slot,
+                                          uint32_t target_slot,
+                                          const DeltaArchiveManifest& manifest);
+
+  std::set<std::string> mapped_devices_;
+  const FeatureFlag dynamic_partitions_;
+  const FeatureFlag virtual_ab_;
+  std::unique_ptr<android::snapshot::SnapshotManager> snapshot_;
+  bool target_supports_snapshot_ = false;
 
   DISALLOW_COPY_AND_ASSIGN(DynamicPartitionControlAndroid);
 };
