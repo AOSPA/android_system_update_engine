@@ -63,7 +63,7 @@ constexpr std::chrono::milliseconds kMapTimeout{1000};
 constexpr std::chrono::milliseconds kMapSnapshotTimeout{5000};
 
 DynamicPartitionControlAndroid::~DynamicPartitionControlAndroid() {
-  CleanupInternal(false /* wait */);
+  CleanupInternal();
 }
 
 static FeatureFlag GetFeatureFlag(const char* enable_prop,
@@ -212,7 +212,8 @@ bool DynamicPartitionControlAndroid::UnmapPartitionOnDeviceMapper(
   return true;
 }
 
-void DynamicPartitionControlAndroid::CleanupInternal(bool wait) {
+void DynamicPartitionControlAndroid::CleanupInternal() {
+  metadata_device_.reset();
   if (mapped_devices_.empty()) {
     return;
   }
@@ -226,7 +227,7 @@ void DynamicPartitionControlAndroid::CleanupInternal(bool wait) {
 }
 
 void DynamicPartitionControlAndroid::Cleanup() {
-  CleanupInternal(true /* wait */);
+  CleanupInternal();
 }
 
 bool DynamicPartitionControlAndroid::DeviceExists(const std::string& path) {
@@ -356,6 +357,11 @@ bool DynamicPartitionControlAndroid::PreparePartitionsForUpdate(
   target_supports_snapshot_ =
       manifest.dynamic_partition_metadata().snapshot_enabled();
 
+  if (GetVirtualAbFeatureFlag().IsEnabled()) {
+    metadata_device_ = snapshot_->EnsureMetadataMounted();
+    TEST_AND_RETURN_FALSE(metadata_device_ != nullptr);
+  }
+
   if (!update)
     return true;
 
@@ -369,6 +375,13 @@ bool DynamicPartitionControlAndroid::PreparePartitionsForUpdate(
       return PrepareSnapshotPartitionsForUpdate(
           source_slot, target_slot, manifest);
     }
+
+    if (GetVirtualAbFeatureFlag().IsLaunch() && !target_supports_snapshot_) {
+      LOG(ERROR) << "Cannot downgrade to a build that does not support "
+                 << "snapshots because this device launches with Virtual A/B.";
+      return false;
+    }
+
     if (!snapshot_->CancelUpdate()) {
       LOG(ERROR) << "Cannot cancel previous update.";
       return false;
