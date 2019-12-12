@@ -1154,7 +1154,16 @@ bool DeltaPerformer::PerformSourceCopyOperation(
 
   TEST_AND_RETURN_FALSE(source_fd_ != nullptr);
 
+  // The device may optimize the SOURCE_COPY operation.
+  // Being this a device-specific optimization let DynamicPartitionController
+  // decide it the operation should be skipped.
+  const PartitionUpdate& partition = partitions_[current_partition_];
+  const auto& partition_control = boot_control_->GetDynamicPartitionControl();
+  bool should_skip = partition_control->ShouldSkipOperation(
+      partition.partition_name(), operation);
+
   if (operation.has_src_sha256_hash()) {
+    bool read_ok;
     brillo::Blob source_hash;
     brillo::Blob expected_source_hash(operation.src_sha256_hash().begin(),
                                       operation.src_sha256_hash().end());
@@ -1163,12 +1172,17 @@ bool DeltaPerformer::PerformSourceCopyOperation(
     // device doesn't match or there was an error reading the source partition.
     // Note that this code will also fall back if writing the target partition
     // fails.
-    bool read_ok = fd_utils::CopyAndHashExtents(source_fd_,
-                                                operation.src_extents(),
-                                                target_fd_,
-                                                operation.dst_extents(),
-                                                block_size_,
-                                                &source_hash);
+    if (should_skip) {
+      read_ok = fd_utils::ReadAndHashExtents(
+          source_fd_, operation.src_extents(), block_size_, &source_hash);
+    } else {
+      read_ok = fd_utils::CopyAndHashExtents(source_fd_,
+                                             operation.src_extents(),
+                                             target_fd_,
+                                             operation.dst_extents(),
+                                             block_size_,
+                                             &source_hash);
+    }
     if (read_ok && expected_source_hash == source_hash)
       return true;
 
@@ -1185,12 +1199,18 @@ bool DeltaPerformer::PerformSourceCopyOperation(
                  << base::HexEncode(expected_source_hash.data(),
                                     expected_source_hash.size());
 
-    TEST_AND_RETURN_FALSE(fd_utils::CopyAndHashExtents(source_ecc_fd_,
-                                                       operation.src_extents(),
-                                                       target_fd_,
-                                                       operation.dst_extents(),
-                                                       block_size_,
-                                                       &source_hash));
+    if (should_skip) {
+      TEST_AND_RETURN_FALSE(fd_utils::ReadAndHashExtents(
+          source_ecc_fd_, operation.src_extents(), block_size_, &source_hash));
+    } else {
+      TEST_AND_RETURN_FALSE(
+          fd_utils::CopyAndHashExtents(source_ecc_fd_,
+                                       operation.src_extents(),
+                                       target_fd_,
+                                       operation.dst_extents(),
+                                       block_size_,
+                                       &source_hash));
+    }
     TEST_AND_RETURN_FALSE(
         ValidateSourceHash(source_hash, operation, source_ecc_fd_, error));
     // At this point reading from the the error corrected device worked, but
@@ -1202,6 +1222,10 @@ bool DeltaPerformer::PerformSourceCopyOperation(
     // corrected device first since we can't verify the block in the raw device
     // at this point, but we fall back to the raw device since the error
     // corrected device can be shorter or not available.
+
+    if (should_skip)
+      return true;
+
     if (OpenCurrentECCPartition() &&
         fd_utils::CopyAndHashExtents(source_ecc_fd_,
                                      operation.src_extents(),
