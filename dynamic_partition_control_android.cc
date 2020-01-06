@@ -50,6 +50,7 @@ using android::fs_mgr::MetadataBuilder;
 using android::fs_mgr::Partition;
 using android::fs_mgr::PartitionOpener;
 using android::fs_mgr::SlotSuffixForSlotNumber;
+using android::snapshot::SourceCopyOperationIsClone;
 
 namespace chromeos_update_engine {
 
@@ -105,7 +106,18 @@ FeatureFlag DynamicPartitionControlAndroid::GetVirtualAbFeatureFlag() {
 }
 
 bool DynamicPartitionControlAndroid::ShouldSkipOperation(
-    const InstallOperation& operation) {
+    const std::string& partition_name, const InstallOperation& operation) {
+  switch (operation.type()) {
+    case InstallOperation::SOURCE_COPY:
+      return target_supports_snapshot_ &&
+             GetVirtualAbFeatureFlag().IsEnabled() &&
+             mapped_devices_.count(partition_name +
+                                   SlotSuffixForSlotNumber(target_slot_)) > 0 &&
+             SourceCopyOperationIsClone(operation);
+      break;
+    default:
+      break;
+  }
   return false;
 }
 
@@ -361,6 +373,9 @@ bool DynamicPartitionControlAndroid::PreparePartitionsForUpdate(
     uint32_t target_slot,
     const DeltaArchiveManifest& manifest,
     bool update) {
+  source_slot_ = source_slot;
+  target_slot_ = target_slot;
+
   if (fs_mgr_overlayfs_is_setup()) {
     // Non DAP devices can use overlayfs as well.
     LOG(WARNING)
@@ -663,6 +678,11 @@ DynamicPartitionControlAndroid::GetDynamicPartitionDevice(
     return DynamicPartitionDeviceStatus::SUCCESS;
   }
   return DynamicPartitionDeviceStatus::ERROR;
+}
+
+void DynamicPartitionControlAndroid::set_fake_mapped_devices(
+    const std::set<std::string>& fake) {
+  mapped_devices_ = fake;
 }
 
 }  // namespace chromeos_update_engine
