@@ -77,6 +77,11 @@ class UpdateAttempterAndroid
   bool ResetStatus(brillo::ErrorPtr* error) override;
   bool VerifyPayloadApplicable(const std::string& metadata_filename,
                                brillo::ErrorPtr* error) override;
+  uint64_t AllocateSpaceForPayload(
+      const std::string& metadata_filename,
+      const std::vector<std::string>& key_value_pair_headers,
+      brillo::ErrorPtr* error) override;
+  int32_t CleanupSuccessfulUpdate(brillo::ErrorPtr* error) override;
 
   // ActionProcessorDelegate methods:
   void ProcessingDone(const ActionProcessor* processor,
@@ -161,6 +166,16 @@ class UpdateAttempterAndroid
   //   |kPrefsSystemUpdatedMarker|, |kPrefsUpdateTimestampStart|,
   //   |kPrefsUpdateBootTimestampStart|
   void ClearMetricsPrefs();
+
+  // Return source and target slots for update.
+  BootControlInterface::Slot GetCurrentSlot() const;
+  BootControlInterface::Slot GetTargetSlot() const;
+
+  // Helper of public VerifyPayloadApplicable. Return the parsed manifest in
+  // |manifest|.
+  static bool VerifyPayloadParseManifest(const std::string& metadata_filename,
+                                         DeltaArchiveManifest* manifest,
+                                         brillo::ErrorPtr* error);
 
   DaemonStateInterface* daemon_state_;
 
