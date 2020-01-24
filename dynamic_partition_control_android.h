@@ -42,8 +42,10 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   bool PreparePartitionsForUpdate(uint32_t source_slot,
                                   uint32_t target_slot,
                                   const DeltaArchiveManifest& manifest,
-                                  bool update) override;
+                                  bool update,
+                                  uint64_t* required_size) override;
   bool FinishUpdate() override;
+  ErrorCode CleanupSuccessfulUpdate() override;
 
   // Return the device for partition |partition_name| at slot |slot|.
   // |current_slot| should be set to the current active slot.
@@ -151,7 +153,8 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   // Virtual A/B update.
   bool PrepareSnapshotPartitionsForUpdate(uint32_t source_slot,
                                           uint32_t target_slot,
-                                          const DeltaArchiveManifest& manifest);
+                                          const DeltaArchiveManifest& manifest,
+                                          uint64_t* required_size);
 
   enum class DynamicPartitionDeviceStatus {
     SUCCESS,
