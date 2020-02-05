@@ -35,9 +35,11 @@ class DynamicPartitionControlStub : public DynamicPartitionControlInterface {
   bool PreparePartitionsForUpdate(uint32_t source_slot,
                                   uint32_t target_slot,
                                   const DeltaArchiveManifest& manifest,
-                                  bool update) override;
+                                  bool update,
+                                  uint64_t* required_size) override;
 
   bool FinishUpdate() override;
+  ErrorCode CleanupSuccessfulUpdate() override;
 };
 
 }  // namespace chromeos_update_engine

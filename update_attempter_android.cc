@@ -217,7 +217,14 @@ bool UpdateAttempterAndroid::ApplyPayload(
   install_plan_.is_resume = !payload_id.empty() &&
                             DeltaPerformer::CanResumeUpdate(prefs_, payload_id);
   if (!install_plan_.is_resume) {
-    if (!DeltaPerformer::ResetUpdateProgress(prefs_, false)) {
+    // No need to reset dynamic_partititon_metadata_updated. If previous calls
+    // to AllocateSpaceForPayload uses the same payload_id, reuse preallocated
+    // space. Otherwise, DeltaPerformer re-allocates space when the payload is
+    // applied.
+    if (!DeltaPerformer::ResetUpdateProgress(
+            prefs_,
+            false /* quick */,
+            true /* skip_dynamic_partititon_metadata_updated */)) {
       LOG(WARNING) << "Unable to reset the update progress.";
     }
     if (!prefs_->SetString(kPrefsUpdateCheckResponseHash, payload_id)) {
@@ -233,20 +240,8 @@ bool UpdateAttempterAndroid::ApplyPayload(
   install_plan_.switch_slot_on_reboot =
       GetHeaderAsBool(headers[kPayloadPropertySwitchSlotOnReboot], true);
 
-  install_plan_.run_post_install = true;
-  // Optionally skip post install if and only if:
-  // a) we're resuming
-  // b) post install has already succeeded before
-  // c) RUN_POST_INSTALL is set to 0.
-  if (install_plan_.is_resume && prefs_->Exists(kPrefsPostInstallSucceeded)) {
-    bool post_install_succeeded = false;
-    if (prefs_->GetBoolean(kPrefsPostInstallSucceeded,
-                           &post_install_succeeded) &&
-        post_install_succeeded) {
-      install_plan_.run_post_install =
-          GetHeaderAsBool(headers[kPayloadPropertyRunPostInstall], true);
-    }
-  }
+  install_plan_.run_post_install =
+      GetHeaderAsBool(headers[kPayloadPropertyRunPostInstall], true);
 
   // Skip writing verity if we're resuming and verity has already been written.
   install_plan_.write_verity = true;
@@ -905,16 +900,48 @@ uint64_t UpdateAttempterAndroid::AllocateSpaceForPayload(
     const std::string& metadata_filename,
     const vector<string>& key_value_pair_headers,
     brillo::ErrorPtr* error) {
-  // TODO(elsk): implement b/138808058
-  LogAndSetError(error, FROM_HERE, "Not implemented.");
+  DeltaArchiveManifest manifest;
+  if (!VerifyPayloadParseManifest(metadata_filename, &manifest, error)) {
+    return 0;
+  }
+  std::map<string, string> headers;
+  if (!ParseKeyValuePairHeaders(key_value_pair_headers, &headers, error)) {
+    return 0;
+  }
+
+  string payload_id = GetPayloadId(headers);
+  uint64_t required_size = 0;
+  if (!DeltaPerformer::PreparePartitionsForUpdate(prefs_,
+                                                  boot_control_,
+                                                  GetTargetSlot(),
+                                                  manifest,
+                                                  payload_id,
+                                                  &required_size)) {
+    if (required_size == 0) {
+      LogAndSetError(error, FROM_HERE, "Failed to allocate space for payload.");
+      return 0;
+    } else {
+      LOG(ERROR) << "Insufficient space for payload: " << required_size
+                 << " bytes";
+      return required_size;
+    }
+  }
+
+  LOG(INFO) << "Successfully allocated space for payload.";
   return 0;
 }
 
 int32_t UpdateAttempterAndroid::CleanupSuccessfulUpdate(
     brillo::ErrorPtr* error) {
-  // TODO(elsk): implement b/138808328
-  LogAndSetError(error, FROM_HERE, "Not implemented.");
-  return static_cast<int32_t>(ErrorCode::kError);
+  ErrorCode error_code =
+      boot_control_->GetDynamicPartitionControl()->CleanupSuccessfulUpdate();
+  if (error_code == ErrorCode::kSuccess) {
+    LOG(INFO) << "Previous update is merged and cleaned up successfully.";
+  } else {
+    LOG(ERROR) << "CleanupSuccessfulUpdate failed with "
+               << utils::ErrorCodeToString(error_code);
+  }
+  return static_cast<int32_t>(error_code);
 }
 
 }  // namespace chromeos_update_engine

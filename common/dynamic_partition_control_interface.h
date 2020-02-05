@@ -22,6 +22,7 @@
 #include <memory>
 #include <string>
 
+#include "update_engine/common/error_code.h"
 #include "update_engine/update_metadata.pb.h"
 
 namespace chromeos_update_engine {
@@ -64,12 +65,27 @@ class DynamicPartitionControlInterface {
   // This is needed before calling MapPartitionOnDeviceMapper(), otherwise the
   // device would be mapped in an inconsistent way.
   // If |update| is set, create snapshots and writes super partition metadata.
+  // If |required_size| is not null and call fails due to insufficient space,
+  // |required_size| will be set to total free space required on userdata
+  // partition to apply the update. Otherwise (call succeeds, or fails
+  // due to other errors), |required_size| is set to zero.
   virtual bool PreparePartitionsForUpdate(uint32_t source_slot,
                                           uint32_t target_slot,
                                           const DeltaArchiveManifest& manifest,
-                                          bool update) = 0;
+                                          bool update,
+                                          uint64_t* required_size) = 0;
 
+  // After writing to new partitions, before rebooting into the new slot, call
+  // this function to indicate writes to new partitions are done.
   virtual bool FinishUpdate() = 0;
+
+  // Before applying the next update, call this function to clean up previous
+  // update files. This function blocks until delta files are merged into
+  // current OS partitions and finished cleaning up.
+  // - If successful, return kSuccess.
+  // - If any error, but caller should retry after reboot, return kError.
+  // - If any irrecoverable failures, return kDeviceCorrupted.
+  virtual ErrorCode CleanupSuccessfulUpdate() = 0;
 };
 
 }  // namespace chromeos_update_engine
