@@ -19,6 +19,7 @@
 
 #include <stdint.h>
 
+#include <memory>
 #include <string>
 
 #include "update_engine/common/dynamic_partition_control_interface.h"
@@ -29,8 +30,9 @@ class DynamicPartitionControlStub : public DynamicPartitionControlInterface {
  public:
   FeatureFlag GetDynamicPartitionsFeatureFlag() override;
   FeatureFlag GetVirtualAbFeatureFlag() override;
-  bool ShouldSkipOperation(const std::string& partition_name,
-                           const InstallOperation& operation) override;
+  bool OptimizeOperation(const std::string& partition_name,
+                         const InstallOperation& operation,
+                         InstallOperation* optimized) override;
   void Cleanup() override;
   bool PreparePartitionsForUpdate(uint32_t source_slot,
                                   uint32_t target_slot,
@@ -39,7 +41,10 @@ class DynamicPartitionControlStub : public DynamicPartitionControlInterface {
                                   uint64_t* required_size) override;
 
   bool FinishUpdate() override;
-  ErrorCode CleanupSuccessfulUpdate() override;
+  std::unique_ptr<AbstractAction> GetCleanupPreviousUpdateAction(
+      BootControlInterface* boot_control,
+      PrefsInterface* prefs,
+      CleanupPreviousUpdateActionDelegateInterface* delegate) override;
 };
 
 }  // namespace chromeos_update_engine

@@ -35,8 +35,9 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   ~DynamicPartitionControlAndroid();
   FeatureFlag GetDynamicPartitionsFeatureFlag() override;
   FeatureFlag GetVirtualAbFeatureFlag() override;
-  bool ShouldSkipOperation(const std::string& partition_name,
-                           const InstallOperation& operation) override;
+  bool OptimizeOperation(const std::string& partition_name,
+                         const InstallOperation& operation,
+                         InstallOperation* optimized) override;
   void Cleanup() override;
 
   bool PreparePartitionsForUpdate(uint32_t source_slot,
@@ -45,7 +46,10 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
                                   bool update,
                                   uint64_t* required_size) override;
   bool FinishUpdate() override;
-  ErrorCode CleanupSuccessfulUpdate() override;
+  std::unique_ptr<AbstractAction> GetCleanupPreviousUpdateAction(
+      BootControlInterface* boot_control,
+      PrefsInterface* prefs,
+      CleanupPreviousUpdateActionDelegateInterface* delegate) override;
 
   // Return the device for partition |partition_name| at slot |slot|.
   // |current_slot| should be set to the current active slot.

@@ -35,6 +35,7 @@
 #include <libdm/dm.h>
 #include <libsnapshot/snapshot.h>
 
+#include "update_engine/cleanup_previous_update_action.h"
 #include "update_engine/common/boot_control_interface.h"
 #include "update_engine/common/utils.h"
 #include "update_engine/dynamic_partition_utils.h"
@@ -50,9 +51,9 @@ using android::fs_mgr::MetadataBuilder;
 using android::fs_mgr::Partition;
 using android::fs_mgr::PartitionOpener;
 using android::fs_mgr::SlotSuffixForSlotNumber;
+using android::snapshot::OptimizeSourceCopyOperation;
 using android::snapshot::Return;
 using android::snapshot::SnapshotManager;
-using android::snapshot::SourceCopyOperationIsClone;
 using android::snapshot::UpdateState;
 
 namespace chromeos_update_engine {
@@ -114,15 +115,17 @@ FeatureFlag DynamicPartitionControlAndroid::GetVirtualAbFeatureFlag() {
   return virtual_ab_;
 }
 
-bool DynamicPartitionControlAndroid::ShouldSkipOperation(
-    const std::string& partition_name, const InstallOperation& operation) {
+bool DynamicPartitionControlAndroid::OptimizeOperation(
+    const std::string& partition_name,
+    const InstallOperation& operation,
+    InstallOperation* optimized) {
   switch (operation.type()) {
     case InstallOperation::SOURCE_COPY:
       return target_supports_snapshot_ &&
              GetVirtualAbFeatureFlag().IsEnabled() &&
              mapped_devices_.count(partition_name +
                                    SlotSuffixForSlotNumber(target_slot_)) > 0 &&
-             SourceCopyOperationIsClone(operation);
+             OptimizeSourceCopyOperation(operation, optimized);
       break;
     default:
       break;
@@ -735,21 +738,6 @@ void DynamicPartitionControlAndroid::set_fake_mapped_devices(
   mapped_devices_ = fake;
 }
 
-ErrorCode DynamicPartitionControlAndroid::CleanupSuccessfulUpdate() {
-  // Already reboot into new boot. Clean up.
-  if (!GetVirtualAbFeatureFlag().IsEnabled()) {
-    return ErrorCode::kSuccess;
-  }
-  auto ret = snapshot_->WaitForMerge();
-  if (ret.is_ok()) {
-    return ErrorCode::kSuccess;
-  }
-  if (ret.error_code() == Return::ErrorCode::NEEDS_REBOOT) {
-    return ErrorCode::kError;
-  }
-  return ErrorCode::kDeviceCorrupted;
-}
-
 bool DynamicPartitionControlAndroid::IsRecovery() {
   return kIsRecovery;
 }
@@ -784,6 +772,18 @@ bool DynamicPartitionControlAndroid::DeleteSourcePartitions(
   DeleteGroupsWithSuffix(builder, source_suffix);
 
   return true;
+}
+
+std::unique_ptr<AbstractAction>
+DynamicPartitionControlAndroid::GetCleanupPreviousUpdateAction(
+    BootControlInterface* boot_control,
+    PrefsInterface* prefs,
+    CleanupPreviousUpdateActionDelegateInterface* delegate) {
+  if (!GetVirtualAbFeatureFlag().IsEnabled()) {
+    return std::make_unique<NoOpAction>();
+  }
+  return std::make_unique<CleanupPreviousUpdateAction>(
+      prefs, boot_control, snapshot_.get(), delegate);
 }
 
 }  // namespace chromeos_update_engine
