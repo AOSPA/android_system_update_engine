@@ -40,11 +40,12 @@ class DynamicPartitionControlStub : public DynamicPartitionControlInterface {
                                   bool update,
                                   uint64_t* required_size) override;
 
-  bool FinishUpdate() override;
+  bool FinishUpdate(bool powerwash_required) override;
   std::unique_ptr<AbstractAction> GetCleanupPreviousUpdateAction(
       BootControlInterface* boot_control,
       PrefsInterface* prefs,
       CleanupPreviousUpdateActionDelegateInterface* delegate) override;
+  bool ResetUpdate(PrefsInterface* prefs) override;
 };
 
 }  // namespace chromeos_update_engine

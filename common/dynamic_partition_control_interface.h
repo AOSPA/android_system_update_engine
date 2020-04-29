@@ -87,7 +87,7 @@ class DynamicPartitionControlInterface {
 
   // After writing to new partitions, before rebooting into the new slot, call
   // this function to indicate writes to new partitions are done.
-  virtual bool FinishUpdate() = 0;
+  virtual bool FinishUpdate(bool powerwash_required) = 0;
 
   // Get an action to clean up previous update.
   // Return NoOpAction on non-Virtual A/B devices.
@@ -98,10 +98,26 @@ class DynamicPartitionControlInterface {
   // - If any error, but caller should retry after reboot, action completes with
   //   kError.
   // - If any irrecoverable failures, action completes with kDeviceCorrupted.
+  //
+  // See ResetUpdate for differences between CleanuPreviousUpdateAction and
+  // ResetUpdate.
   virtual std::unique_ptr<AbstractAction> GetCleanupPreviousUpdateAction(
       BootControlInterface* boot_control,
       PrefsInterface* prefs,
       CleanupPreviousUpdateActionDelegateInterface* delegate) = 0;
+
+  // Called after an unwanted payload has been successfully applied and the
+  // device has not yet been rebooted.
+  //
+  // For snapshot updates (Virtual A/B), it calls
+  // DeltaPerformer::ResetUpdateProgress(false /* quick */) and
+  // frees previously allocated space; the next update will need to be
+  // started over.
+  //
+  // Note: CleanupPreviousUpdateAction does not do anything if an update is in
+  // progress, while ResetUpdate() forcefully free previously
+  // allocated space for snapshot updates.
+  virtual bool ResetUpdate(PrefsInterface* prefs) = 0;
 };
 
 }  // namespace chromeos_update_engine

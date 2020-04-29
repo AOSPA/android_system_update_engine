@@ -51,7 +51,7 @@ bool DynamicPartitionControlStub::PreparePartitionsForUpdate(
   return true;
 }
 
-bool DynamicPartitionControlStub::FinishUpdate() {
+bool DynamicPartitionControlStub::FinishUpdate(bool powerwash_required) {
   return true;
 }
 
@@ -61,6 +61,10 @@ DynamicPartitionControlStub::GetCleanupPreviousUpdateAction(
     PrefsInterface* prefs,
     CleanupPreviousUpdateActionDelegateInterface* delegate) {
   return std::make_unique<NoOpAction>();
+}
+
+bool DynamicPartitionControlStub::ResetUpdate(PrefsInterface* prefs) {
+  return false;
 }
 
 }  // namespace chromeos_update_engine

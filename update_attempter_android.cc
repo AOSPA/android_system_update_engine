@@ -158,7 +158,12 @@ void UpdateAttempterAndroid::Init() {
   } else {
     SetStatusAndNotify(UpdateStatus::IDLE);
     UpdatePrefsAndReportUpdateMetricsOnReboot();
+#ifdef _UE_SIDELOAD
+    LOG(INFO) << "Skip ScheduleCleanupPreviousUpdate in sideload because "
+              << "ApplyPayload will call it later.";
+#else
     ScheduleCleanupPreviousUpdate();
+#endif
   }
 }
 
@@ -345,15 +350,16 @@ bool UpdateAttempterAndroid::ResetStatus(brillo::ErrorPtr* error) {
             << UpdateStatusToString(status_) << " to UpdateStatus::IDLE";
 
   switch (status_) {
-    case UpdateStatus::IDLE:
+    case UpdateStatus::IDLE: {
+      if (!boot_control_->GetDynamicPartitionControl()->ResetUpdate(prefs_)) {
+        LOG(WARNING) << "Failed to reset snapshots. UpdateStatus is IDLE but"
+                     << "space might not be freed.";
+      }
       return true;
+    }
 
     case UpdateStatus::UPDATED_NEED_REBOOT: {
-      // Remove the reboot marker so that if the machine is rebooted
-      // after resetting to idle state, it doesn't go back to
-      // UpdateStatus::UPDATED_NEED_REBOOT state.
-      bool ret_value = prefs_->Delete(kPrefsUpdateCompletedOnBootId);
-      ClearMetricsPrefs();
+      bool ret_value = true;
 
       // Update the boot flags so the current slot has higher priority.
       if (!boot_control_->SetActiveBootSlot(GetCurrentSlot()))
@@ -367,6 +373,17 @@ bool UpdateAttempterAndroid::ResetStatus(brillo::ErrorPtr* error) {
 
       // Resets the warm reset property since we won't switch the slot.
       hardware_->SetWarmReset(false);
+
+      // Remove update progress for DeltaPerformer and remove snapshots.
+      if (!boot_control_->GetDynamicPartitionControl()->ResetUpdate(prefs_))
+        ret_value = false;
+
+      // Remove the reboot marker so that if the machine is rebooted
+      // after resetting to idle state, it doesn't go back to
+      // UpdateStatus::UPDATED_NEED_REBOOT state.
+      if (!prefs_->Delete(kPrefsUpdateCompletedOnBootId))
+        ret_value = false;
+      ClearMetricsPrefs();
 
       if (!ret_value) {
         return LogAndSetError(
@@ -644,6 +661,8 @@ void UpdateAttempterAndroid::TerminateUpdateAndNotify(ErrorCode error_code) {
   if (status_ == UpdateStatus::CLEANUP_PREVIOUS_UPDATE) {
     LOG(INFO) << "Terminating cleanup previous update.";
     SetStatusAndNotify(UpdateStatus::IDLE);
+    for (auto observer : daemon_state_->service_observers())
+      observer->SendPayloadApplicationComplete(error_code);
     return;
   }
 

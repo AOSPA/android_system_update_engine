@@ -18,6 +18,7 @@
 #include <chrono>  // NOLINT(build/c++11) -- for merge times
 #include <functional>
 #include <string>
+#include <type_traits>
 
 #include <android-base/properties.h>
 #include <base/bind.h>
@@ -42,6 +43,12 @@ constexpr auto kCheckSlotMarkedSuccessfulInterval =
     base::TimeDelta::FromSeconds(2);
 // Interval to call SnapshotManager::ProcessUpdateState
 constexpr auto kWaitForMergeInterval = base::TimeDelta::FromSeconds(2);
+
+#ifdef __ANDROID_RECOVERY__
+static constexpr bool kIsRecovery = true;
+#else
+static constexpr bool kIsRecovery = false;
+#endif
 
 namespace chromeos_update_engine {
 
@@ -84,6 +91,7 @@ void CleanupPreviousUpdateAction::SuspendAction() {
 void CleanupPreviousUpdateAction::ActionCompleted(ErrorCode error_code) {
   running_ = false;
   ReportMergeStats();
+  metadata_device_ = nullptr;
 }
 
 std::string CleanupPreviousUpdateAction::Type() const {
@@ -118,7 +126,8 @@ void CleanupPreviousUpdateAction::ScheduleWaitBootCompleted() {
 
 void CleanupPreviousUpdateAction::WaitBootCompletedOrSchedule() {
   TEST_AND_RETURN(running_);
-  if (!android::base::GetBoolProperty(kBootCompletedProp, false)) {
+  if (!kIsRecovery &&
+      !android::base::GetBoolProperty(kBootCompletedProp, false)) {
     // repeat
     ScheduleWaitBootCompleted();
     return;
@@ -140,9 +149,51 @@ void CleanupPreviousUpdateAction::ScheduleWaitMarkBootSuccessful() {
 
 void CleanupPreviousUpdateAction::CheckSlotMarkedSuccessfulOrSchedule() {
   TEST_AND_RETURN(running_);
-  if (!boot_control_->IsSlotMarkedSuccessful(boot_control_->GetCurrentSlot())) {
+  if (!kIsRecovery &&
+      !boot_control_->IsSlotMarkedSuccessful(boot_control_->GetCurrentSlot())) {
     ScheduleWaitMarkBootSuccessful();
   }
+
+  if (metadata_device_ == nullptr) {
+    metadata_device_ = snapshot_->EnsureMetadataMounted();
+  }
+
+  if (metadata_device_ == nullptr) {
+    LOG(ERROR) << "Failed to mount /metadata.";
+    processor_->ActionComplete(this, ErrorCode::kError);
+    return;
+  }
+
+  if (kIsRecovery) {
+    auto snapshots_created =
+        snapshot_->RecoveryCreateSnapshotDevices(metadata_device_);
+    switch (snapshots_created) {
+      case android::snapshot::CreateResult::CREATED: {
+        // If previous update has not finished merging, snapshots exists and are
+        // created here so that ProcessUpdateState can proceed.
+        LOG(INFO) << "Snapshot devices are created";
+        break;
+      }
+      case android::snapshot::CreateResult::NOT_CREATED: {
+        // If there is no previous update, no snapshot devices are created and
+        // ProcessUpdateState will return immediately. Hence, NOT_CREATED is not
+        // considered an error.
+        LOG(INFO) << "Snapshot devices are not created";
+        break;
+      }
+      case android::snapshot::CreateResult::ERROR:
+      default: {
+        LOG(ERROR)
+            << "Failed to create snapshot devices (CreateResult = "
+            << static_cast<
+                   std::underlying_type_t<android::snapshot::CreateResult>>(
+                   snapshots_created);
+        processor_->ActionComplete(this, ErrorCode::kError);
+        return;
+      }
+    }
+  }
+
   if (!merge_stats_->Start()) {
     // Not an error because CleanupPreviousUpdateAction may be paused and
     // resumed while kernel continues merging snapshots in the background.
