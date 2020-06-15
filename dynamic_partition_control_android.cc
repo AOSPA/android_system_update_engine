@@ -570,18 +570,15 @@ bool DynamicPartitionControlAndroid::GetSystemOtherPath(
   path->clear();
   *should_unmap = false;
 
-  // In recovery, just erase no matter what.
-  //   - On devices with retrofit dynamic partitions, no logical partitions
-  //     should be mounted at this point. Hence it should be safe to erase.
-  // Otherwise, do check that AVB is enabled on system_other before erasing.
-  if (!IsRecovery()) {
-    auto has_avb = IsAvbEnabledOnSystemOther();
-    TEST_AND_RETURN_FALSE(has_avb.has_value());
-    if (!has_avb.value()) {
-      LOG(INFO) << "AVB is not enabled on system_other. Skip erasing.";
-      return true;
-    }
+  // Check that AVB is enabled on system_other before erasing.
+  auto has_avb = IsAvbEnabledOnSystemOther();
+  TEST_AND_RETURN_FALSE(has_avb.has_value());
+  if (!has_avb.value()) {
+    LOG(INFO) << "AVB is not enabled on system_other. Skip erasing.";
+    return true;
+  }
 
+  if (!IsRecovery()) {
     // Found unexpected avb_keys for system_other on devices retrofitting
     // dynamic partitions. Previous crash in update_engine may leave logical
     // partitions mapped on physical system_other partition. It is difficult to
@@ -644,6 +641,13 @@ bool DynamicPartitionControlAndroid::GetSystemOtherPath(
   if (p->attributes() & LP_PARTITION_ATTR_UPDATED) {
     LOG(INFO) << partition_name_suffix
               << " does not contain system_other, skip erasing.";
+    return true;
+  }
+
+  if (p->size() < AVB_FOOTER_SIZE) {
+    LOG(INFO) << partition_name_suffix << " has length " << p->size()
+              << "( < AVB_FOOTER_SIZE " << AVB_FOOTER_SIZE
+              << "), skip erasing.";
     return true;
   }
 
