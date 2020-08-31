@@ -20,6 +20,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <vector>
 
 #include <base/files/file_util.h>
 #include <libsnapshot/auto_device.h>
@@ -53,11 +54,28 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
 
   bool ResetUpdate(PrefsInterface* prefs) override;
 
+  bool ListDynamicPartitionsForSlot(
+      uint32_t current_slot, std::vector<std::string>* partitions) override;
+
+  bool VerifyExtentsForUntouchedPartitions(
+      uint32_t source_slot,
+      uint32_t target_slot,
+      const std::vector<std::string>& partitions) override;
+
+  bool GetDeviceDir(std::string* path) override;
+
   // Return the device for partition |partition_name| at slot |slot|.
   // |current_slot| should be set to the current active slot.
   // Note: this function is only used by BootControl*::GetPartitionDevice.
   // Other callers should prefer BootControl*::GetPartitionDevice over
   // BootControl*::GetDynamicPartitionControl()->GetPartitionDevice().
+  bool GetPartitionDevice(const std::string& partition_name,
+                          uint32_t slot,
+                          uint32_t current_slot,
+                          bool not_in_payload,
+                          std::string* device,
+                          bool* is_dynamic);
+
   bool GetPartitionDevice(const std::string& partition_name,
                           uint32_t slot,
                           uint32_t current_slot,
@@ -72,16 +90,14 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   virtual bool UnmapPartitionOnDeviceMapper(
       const std::string& target_partition_name);
 
-  // Retrieve metadata from |super_device| at slot |source_slot|.
-  //
-  // If |target_slot| != kInvalidSlot, before returning the metadata, this
-  // function modifies the metadata so that during updates, the metadata can be
-  // written to |target_slot|. In particular, on retrofit devices, the returned
-  // metadata automatically includes block devices at |target_slot|.
-  //
-  // If |target_slot| == kInvalidSlot, this function returns metadata at
-  // |source_slot| without modifying it. This is the same as
-  // LoadMetadataBuilder(const std::string&, uint32_t).
+  // Retrieves metadata from |super_device| at slot |slot|.
+  virtual std::unique_ptr<android::fs_mgr::MetadataBuilder> LoadMetadataBuilder(
+      const std::string& super_device, uint32_t slot);
+
+  // Retrieves metadata from |super_device| at slot |source_slot|. And modifies
+  // the metadata so that during updates, the metadata can be written to
+  // |target_slot|. In particular, on retrofit devices, the returned metadata
+  // automatically includes block devices at |target_slot|.
   virtual std::unique_ptr<android::fs_mgr::MetadataBuilder> LoadMetadataBuilder(
       const std::string& super_device,
       uint32_t source_slot,
@@ -119,13 +135,6 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   // parameter is not set.
   virtual bool GetDmDevicePathByName(const std::string& name,
                                      std::string* path);
-
-  // Retrieve metadata from |super_device| at slot |source_slot|.
-  virtual std::unique_ptr<android::fs_mgr::MetadataBuilder> LoadMetadataBuilder(
-      const std::string& super_device, uint32_t source_slot);
-
-  // Return a possible location for devices listed by name.
-  virtual bool GetDeviceDir(std::string* path);
 
   // Return the name of the super partition (which stores super partition
   // metadata) for a given slot.
@@ -173,8 +182,19 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   virtual bool EraseSystemOtherAvbFooter(uint32_t source_slot,
                                          uint32_t target_slot);
 
+  // Helper for PreparePartitionsForUpdate. Used for devices with dynamic
+  // partitions updating without snapshots.
+  // If |delete_source| is set, source partitions are deleted before resizing
+  // target partitions (using DeleteSourcePartitions).
+  virtual bool PrepareDynamicPartitionsForUpdate(
+      uint32_t source_slot,
+      uint32_t target_slot,
+      const DeltaArchiveManifest& manifest,
+      bool delete_source);
+
  private:
   friend class DynamicPartitionControlAndroidTest;
+  friend class SnapshotPartitionTestP;
 
   void UnmapAllPartitions();
   bool MapPartitionInternal(const std::string& super_device,
@@ -188,15 +208,6 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   bool UpdatePartitionMetadata(android::fs_mgr::MetadataBuilder* builder,
                                uint32_t target_slot,
                                const DeltaArchiveManifest& manifest);
-
-  // Helper for PreparePartitionsForUpdate. Used for devices with dynamic
-  // partitions updating without snapshots.
-  // If |delete_source| is set, source partitions are deleted before resizing
-  // target partitions (using DeleteSourcePartitions).
-  bool PrepareDynamicPartitionsForUpdate(uint32_t source_slot,
-                                         uint32_t target_slot,
-                                         const DeltaArchiveManifest& manifest,
-                                         bool delete_source);
 
   // Helper for PreparePartitionsForUpdate. Used for snapshotted partitions for
   // Virtual A/B update.
@@ -220,6 +231,7 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
       const std::string& partition_name_suffix,
       uint32_t slot,
       uint32_t current_slot,
+      bool not_in_payload,
       std::string* device);
 
   // Return true if |partition_name_suffix| is a block device of
@@ -258,7 +270,7 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   std::set<std::string> mapped_devices_;
   const FeatureFlag dynamic_partitions_;
   const FeatureFlag virtual_ab_;
-  std::unique_ptr<android::snapshot::SnapshotManager> snapshot_;
+  std::unique_ptr<android::snapshot::ISnapshotManager> snapshot_;
   std::unique_ptr<android::snapshot::AutoDevice> metadata_device_;
   bool target_supports_snapshot_ = false;
   // Whether the target partitions should be loaded as dynamic partitions. Set

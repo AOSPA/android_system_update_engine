@@ -170,12 +170,8 @@ struct PayloadVersion {
   // Return whether the passed |operation| is allowed by this payload.
   bool OperationAllowed(InstallOperation::Type operation) const;
 
-  // Whether this payload version is a delta payload.
-  bool IsDelta() const;
-
-  // Tells whether the update is done in-place, that is, whether the operations
-  // read and write from the same partition.
-  bool InplaceUpdate() const;
+  // Whether this payload version is a delta or partial payload.
+  bool IsDeltaOrPartial() const;
 
   // The major version of the payload.
   uint64_t major;
@@ -201,6 +197,10 @@ struct PayloadGenerationConfig {
 
   // Whether the requested payload is a delta payload.
   bool is_delta = false;
+
+  // Whether the requested payload is a partial payload, i.e. only update a
+  // subset of partitions on device.
+  bool is_partial_update = false;
 
   // The major/minor version of the payload.
   PayloadVersion version;
