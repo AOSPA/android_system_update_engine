@@ -576,9 +576,9 @@ void UpdateAttempterAndroid::ActionCompleted(ActionProcessor* processor,
     cleanup_previous_update_code_ = code;
     NotifyCleanupPreviousUpdateCallbacksAndClear();
   }
-  if (type == DownloadAction::StaticType()) {
-    download_progress_ = 0;
-  }
+  // download_progress_ is actually used by other actions, such as
+  // filesystem_verify_action. Therefore we always clear it.
+  download_progress_ = 0;
   if (type == PostinstallRunnerAction::StaticType()) {
     bool succeeded =
         code == ErrorCode::kSuccess || code == ErrorCode::kUpdatedButNotActive;
@@ -592,8 +592,11 @@ void UpdateAttempterAndroid::ActionCompleted(ActionProcessor* processor,
     SetStatusAndNotify(UpdateStatus::CLEANUP_PREVIOUS_UPDATE);
   }
   if (type == DownloadAction::StaticType()) {
-    SetStatusAndNotify(UpdateStatus::FINALIZING);
+    auto download_action = static_cast<DownloadAction*>(action);
+    install_plan_ = *download_action->install_plan();
+    SetStatusAndNotify(UpdateStatus::VERIFYING);
   } else if (type == FilesystemVerifierAction::StaticType()) {
+    SetStatusAndNotify(UpdateStatus::FINALIZING);
     prefs_->SetBoolean(kPrefsVerityWritten, true);
   }
 }
@@ -642,6 +645,11 @@ void UpdateAttempterAndroid::ProgressUpdate(double progress) {
     download_progress_ = progress;
     SetStatusAndNotify(status_);
   }
+}
+
+void UpdateAttempterAndroid::OnVerifyProgressUpdate(double progress) {
+  assert(status_ == UpdateStatus::VERIFYING);
+  ProgressUpdate(progress);
 }
 
 void UpdateAttempterAndroid::ScheduleProcessingStart() {
@@ -730,10 +738,11 @@ void UpdateAttempterAndroid::BuildUpdateActions(HttpFetcher* fetcher) {
                                        true /* interactive */);
   download_action->set_delegate(this);
   download_action->set_base_offset(base_offset_);
-  auto filesystem_verifier_action =
-      std::make_unique<FilesystemVerifierAction>();
+  auto filesystem_verifier_action = std::make_unique<FilesystemVerifierAction>(
+      boot_control_->GetDynamicPartitionControl());
   auto postinstall_runner_action =
       std::make_unique<PostinstallRunnerAction>(boot_control_, hardware_);
+  filesystem_verifier_action->set_delegate(this);
   postinstall_runner_action->set_delegate(this);
 
   // Bond them together. We have to use the leaf-types when calling

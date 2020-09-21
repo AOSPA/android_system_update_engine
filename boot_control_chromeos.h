@@ -47,6 +47,11 @@ class BootControlChromeOS : public BootControlInterface {
   BootControlInterface::Slot GetCurrentSlot() const override;
   bool GetPartitionDevice(const std::string& partition_name,
                           BootControlInterface::Slot slot,
+                          bool not_in_payload,
+                          std::string* device,
+                          bool* is_dynamic) const override;
+  bool GetPartitionDevice(const std::string& partition_name,
+                          BootControlInterface::Slot slot,
                           std::string* device) const override;
   bool IsSlotBootable(BootControlInterface::Slot slot) const override;
   bool MarkSlotUnbootable(BootControlInterface::Slot slot) override;
@@ -59,6 +64,7 @@ class BootControlChromeOS : public BootControlInterface {
   friend class BootControlChromeOSTest;
   FRIEND_TEST(BootControlChromeOSTest, SysfsBlockDeviceTest);
   FRIEND_TEST(BootControlChromeOSTest, GetPartitionNumberTest);
+  FRIEND_TEST(BootControlChromeOSTest, ParseDlcPartitionNameTest);
 
   // Returns the sysfs block device for a root block device. For example,
   // SysfsBlockDevice("/dev/sda") returns "/sys/block/sda". Returns an empty
@@ -73,6 +79,13 @@ class BootControlChromeOS : public BootControlInterface {
   // |partition_name| and |slot|. In case of invalid data, returns -1.
   int GetPartitionNumber(const std::string partition_name,
                          BootControlInterface::Slot slot) const;
+
+  // Extracts DLC module ID and package ID from partition name. The structure of
+  // the partition name is dlc/<dlc-id>/<dlc-package>. For example:
+  // dlc/fake-dlc/fake-package
+  bool ParseDlcPartitionName(const std::string partition_name,
+                             std::string* dlc_id,
+                             std::string* dlc_package) const;
 
   // Cached values for GetNumSlots() and GetCurrentSlot().
   BootControlInterface::Slot num_slots_{1};
