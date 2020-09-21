@@ -25,6 +25,7 @@
 #include <base/time/time.h>
 #include <debugd/dbus-proxies.h>
 
+#include "update_engine/common/error_code.h"
 #include "update_engine/common/hardware_interface.h"
 
 namespace chromeos_update_engine {
@@ -63,6 +64,11 @@ class HardwareChromeOS final : public HardwareInterface {
   bool GetFirstActiveOmahaPingSent() const override;
   bool SetFirstActiveOmahaPingSent() override;
   void SetWarmReset(bool warm_reset) override;
+  std::string GetVersionForLogging(
+      const std::string& partition_name) const override;
+  ErrorCode IsPartitionUpdateValid(
+      const std::string& partition_name,
+      const std::string& new_version) const override;
 
  private:
   friend class HardwareChromeOSTest;

@@ -186,6 +186,10 @@ if [[ "${COMMAND}" == "generate" ]]; then
     "Optional: The maximum unix timestamp of the OS allowed to apply this \
 payload, should be set to a number higher than the build timestamp of the \
 system running on the device, 0 if not specified."
+  DEFINE_string partition_timestamps "" \
+    "Optional: Per-partition maximum unix timestamp of the OS allowed to \
+apply this payload. Should be a comma separated key value pairs. e.x.\
+system:1234,vendor:456"
   DEFINE_string disable_fec_computation "" \
     "Optional: Disables the on device fec data computation for incremental \
 update. This feature is enabled by default."
@@ -696,6 +700,10 @@ cmd_generate() {
     GENERATOR_ARGS+=( --max_timestamp="${FLAGS_max_timestamp}" )
   fi
 
+  if [[ -n "${FLAGS_partition_timestamps}" ]]; then
+    GENERATOR_ARGS+=( --partition_timestamps="${FLAGS_partition_timestamps}" )
+  fi
+
   if [[ -n "${POSTINSTALL_CONFIG_FILE}" ]]; then
     GENERATOR_ARGS+=(
       --new_postinstall_config_file="${POSTINSTALL_CONFIG_FILE}"
@@ -896,8 +904,8 @@ cmd_check() {
   check_update_payload ${PAYCHECK_ARGS[@]} --check
 }
 
-# Sanity check that the real generator exists:
-GENERATOR="$(which delta_generator || true)"
+# Check that the real generator exists:
+[[ -x "${GENERATOR}" ]] || GENERATOR="$(which delta_generator || true)"
 [[ -x "${GENERATOR}" ]] || die "can't find delta_generator"
 
 case "$COMMAND" in
