@@ -260,6 +260,7 @@ cc_defaults {
     ],
 
     static_libs: [
+        "libkver",
         "libpayload_consumer",
         "libupdate_engine_boot_control",
     ],
@@ -272,6 +273,7 @@ cc_defaults {
         "libbrillo-binder",
         "libcurl",
         "libcutils",
+        "libupdate_engine_stable-cpp",
         "liblog",
         "libssl",
         "libstatslog",
@@ -298,13 +300,13 @@ cc_library_static {
     srcs: [
         ":libupdate_engine_aidl",
         "binder_service_android.cc",
+        "binder_service_stable_android.cc",
         "certificate_checker.cc",
         "daemon_android.cc",
         "daemon_state_android.cc",
         "hardware_android.cc",
         "libcurl_http_fetcher.cc",
         "logging_android.cc",
-        "metrics_reporter_android.cc",
         "metrics_utils.cc",
         "network_selector_android.cc",
         "update_attempter_android.cc",
@@ -329,7 +331,7 @@ cc_binary {
         "otacerts",
     ],
 
-    srcs: ["main.cc"],
+    srcs: ["main.cc", "metrics_reporter_android.cc"],
     init_rc: ["update_engine.rc"],
 }
 
@@ -388,6 +390,7 @@ cc_binary {
         "libbrillo-stream",
         "libbrillo",
         "libchrome",
+        "libkver",
     ],
     target: {
         recovery: {
@@ -468,6 +471,20 @@ cc_defaults {
 }
 
 cc_library_static {
+    name: "libpayload_extent_ranges",
+    defaults: [
+        "ue_defaults",
+    ],
+    host_supported: true,
+    srcs: [
+        "payload_generator/extent_ranges.cc",
+    ],
+    static_libs: [
+        "update_metadata-protos",
+    ],
+}
+
+cc_library_static {
     name: "libpayload_generator",
     defaults: [
         "ue_defaults",
@@ -490,6 +507,7 @@ cc_library_static {
         "payload_generator/extent_utils.cc",
         "payload_generator/full_update_generator.cc",
         "payload_generator/mapfile_filesystem.cc",
+        "payload_generator/merge_sequence_generator.cc",
         "payload_generator/payload_file.cc",
         "payload_generator/payload_generation_config_android.cc",
         "payload_generator/payload_generation_config.cc",
@@ -666,11 +684,13 @@ cc_test {
         "common/utils_unittest.cc",
         "dynamic_partition_control_android_unittest.cc",
         "libcurl_http_fetcher_unittest.cc",
+        "hardware_android_unittest.cc",
         "payload_consumer/bzip_extent_writer_unittest.cc",
         "payload_consumer/cached_file_descriptor_unittest.cc",
         "payload_consumer/certificate_parser_android_unittest.cc",
         "payload_consumer/delta_performer_integration_test.cc",
         "payload_consumer/delta_performer_unittest.cc",
+        "payload_consumer/download_action_android_unittest.cc",
         "payload_consumer/extent_reader_unittest.cc",
         "payload_consumer/extent_writer_unittest.cc",
         "payload_consumer/fake_file_descriptor.cc",
@@ -693,6 +713,7 @@ cc_test {
         "payload_generator/fake_filesystem.cc",
         "payload_generator/full_update_generator_unittest.cc",
         "payload_generator/mapfile_filesystem_unittest.cc",
+        "payload_generator/merge_sequence_generator_unittest.cc",
         "payload_generator/payload_file_unittest.cc",
         "payload_generator/payload_generation_config_android_unittest.cc",
         "payload_generator/payload_generation_config_unittest.cc",
@@ -703,17 +724,18 @@ cc_test {
         "testrunner.cc",
         "update_attempter_android_unittest.cc",
         "update_status_utils_unittest.cc",
+        "metrics_reporter_stub.cc",
     ],
 }
 
 // Brillo update payload generation script
 // ========================================================
-cc_prebuilt_binary {
+sh_binary {
     name: "brillo_update_payload",
     device_supported: false,
     host_supported: true,
 
-    srcs: ["scripts/brillo_update_payload"],
+    src: "scripts/brillo_update_payload",
     required: [
         "delta_generator",
         "shflags",
@@ -725,4 +747,14 @@ cc_prebuilt_binary {
             enabled: false,
         },
     },
+}
+
+// update_engine header library
+cc_library_headers {
+    name: "libupdate_engine_headers",
+    export_include_dirs: ["."],
+    apex_available: [
+        "com.android.gki.*",
+    ],
+    host_supported: true,
 }

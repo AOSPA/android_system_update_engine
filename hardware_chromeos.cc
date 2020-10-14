@@ -47,7 +47,7 @@ namespace {
 const char kOOBECompletedMarker[] = "/home/chronos/.oobe_completed";
 
 // The stateful directory used by update_engine to store powerwash-safe files.
-// The files stored here must be safelisted in the powerwash scripts.
+// The files stored here must be added to the powerwash script allowlist.
 const char kPowerwashSafeDirectory[] =
     "/mnt/stateful_partition/unencrypted/preserve";
 
@@ -383,5 +383,17 @@ bool HardwareChromeOS::SetFirstActiveOmahaPingSent() {
 }
 
 void HardwareChromeOS::SetWarmReset(bool warm_reset) {}
+
+std::string HardwareChromeOS::GetVersionForLogging(
+    const std::string& partition_name) const {
+  // TODO(zhangkelvin) Implement per-partition timestamp for Chrome OS.
+  return "";
+}
+
+ErrorCode HardwareChromeOS::IsPartitionUpdateValid(
+    const std::string& partition_name, const std::string& new_version) const {
+  // TODO(zhangkelvin) Implement per-partition timestamp for Chrome OS.
+  return ErrorCode::kSuccess;
+}
 
 }  // namespace chromeos_update_engine

@@ -25,6 +25,8 @@
 #include <base/files/file_path.h>
 #include <base/time/time.h>
 
+#include "update_engine/common/error_code.h"
+
 namespace chromeos_update_engine {
 
 // The hardware interface allows access to the crossystem exposed properties,
@@ -142,6 +144,26 @@ class HardwareInterface {
   // If |warm_reset| is true, sets the warm reset to indicate a warm reset is
   // needed on the next reboot. Otherwise, clears the flag.
   virtual void SetWarmReset(bool warm_reset) = 0;
+
+  // Return the version/timestamp for partition `partition_name`.
+  // Don't make any assumption about the formatting of returned string.
+  // Only used for logging/debugging purposes.
+  virtual std::string GetVersionForLogging(
+      const std::string& partition_name) const = 0;
+
+  // Return true if and only if `new_version` is "newer" than the
+  // version number of partition `partition_name`. The notion of
+  // "newer" is defined by this function. Caller should not make
+  // any assumption about the underlying logic.
+  // Return:
+  // - kSuccess if update is valid.
+  // - kPayloadTimestampError if downgrade is detected
+  // - kDownloadManifestParseError if |new_version| has an incorrect format
+  // - Other error values if the source of error is known, or kError for
+  //   a generic error on the device.
+  virtual ErrorCode IsPartitionUpdateValid(
+      const std::string& partition_name,
+      const std::string& new_version) const = 0;
 };
 
 }  // namespace chromeos_update_engine

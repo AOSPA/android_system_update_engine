@@ -41,6 +41,8 @@
 #include <puffin/puffpatch.h>
 
 #include "update_engine/common/constants.h"
+#include "update_engine/common/error_code.h"
+#include "update_engine/common/error_code_utils.h"
 #include "update_engine/common/hardware_interface.h"
 #include "update_engine/common/prefs_interface.h"
 #include "update_engine/common/subprocess.h"
@@ -737,7 +739,7 @@ bool DeltaPerformer::Write(const void* bytes, size_t count, ErrorCode* error) {
     CheckpointUpdateProgress(false);
   }
 
-  // In major version 2, we don't add dummy operation to the payload.
+  // In major version 2, we don't add unused operation to the payload.
   // If we already extracted the signature we should skip this step.
   if (manifest_.has_signatures_offset() && manifest_.has_signatures_size() &&
       signatures_message_data_.empty()) {
@@ -1149,7 +1151,8 @@ bool DeltaPerformer::PerformSourceCopyOperation(
     }
     if (read_ok && expected_source_hash == source_hash)
       return true;
-
+    LOG(WARNING) << "Source hash from RAW device mismatched, attempting to "
+                    "correct using ECC";
     if (!OpenCurrentECCPartition()) {
       // The following function call will return false since the source hash
       // mismatches, but we still want to call it so it prints the appropriate
@@ -1162,7 +1165,6 @@ bool DeltaPerformer::PerformSourceCopyOperation(
                  << ", expected "
                  << base::HexEncode(expected_source_hash.data(),
                                     expected_source_hash.size());
-
     if (should_optimize) {
       TEST_AND_RETURN_FALSE(fd_utils::ReadAndHashExtents(
           source_ecc_fd_, operation.src_extents(), block_size_, &source_hash));
@@ -1567,7 +1569,7 @@ DeltaPerformer::CreatePayloadVerifier() {
 }
 
 ErrorCode DeltaPerformer::ValidateManifest() {
-  // Perform assorted checks to sanity check the manifest, make sure it
+  // Perform assorted checks to validation check the manifest, make sure it
   // matches data from other sources, and that it is a supported version.
   bool has_old_fields = std::any_of(manifest_.partitions().begin(),
                                     manifest_.partitions().end(),
@@ -1625,22 +1627,107 @@ ErrorCode DeltaPerformer::ValidateManifest() {
     LOG(ERROR) << "Manifest contains deprecated fields.";
     return ErrorCode::kPayloadMismatchedType;
   }
-
-  if (manifest_.max_timestamp() < hardware_->GetBuildTimestamp()) {
-    LOG(ERROR) << "The current OS build timestamp ("
-               << hardware_->GetBuildTimestamp()
-               << ") is newer than the maximum timestamp in the manifest ("
-               << manifest_.max_timestamp() << ")";
-    if (!hardware_->AllowDowngrade()) {
-      return ErrorCode::kPayloadTimestampError;
+  ErrorCode error_code = CheckTimestampError();
+  if (error_code != ErrorCode::kSuccess) {
+    if (error_code == ErrorCode::kPayloadTimestampError) {
+      if (!hardware_->AllowDowngrade()) {
+        return ErrorCode::kPayloadTimestampError;
+      }
+      LOG(INFO) << "The current OS build allows downgrade, continuing to apply"
+                   " the payload with an older timestamp.";
+    } else {
+      LOG(ERROR) << "Timestamp check returned "
+                 << utils::ErrorCodeToString(error_code);
+      return error_code;
     }
-    LOG(INFO) << "The current OS build allows downgrade, continuing to apply"
-                 " the payload with an older timestamp.";
   }
 
   // TODO(crbug.com/37661) we should be adding more and more manifest checks,
   // such as partition boundaries, etc.
 
+  return ErrorCode::kSuccess;
+}
+
+ErrorCode DeltaPerformer::CheckTimestampError() const {
+  bool is_partial_update =
+      manifest_.has_partial_update() && manifest_.partial_update();
+  const auto& partitions = manifest_.partitions();
+
+  // Check version field for a given PartitionUpdate object. If an error
+  // is encountered, set |error_code| accordingly. If downgrade is detected,
+  // |downgrade_detected| is set. Return true if the program should continue to
+  // check the next partition or not, or false if it should exit early due to
+  // errors.
+  auto&& timestamp_valid = [this](const PartitionUpdate& partition,
+                                  bool allow_empty_version,
+                                  bool* downgrade_detected) -> ErrorCode {
+    if (!partition.has_version()) {
+      if (allow_empty_version) {
+        return ErrorCode::kSuccess;
+      }
+      LOG(ERROR)
+          << "PartitionUpdate " << partition.partition_name()
+          << " does ot have a version field. Not allowed in partial updates.";
+      return ErrorCode::kDownloadManifestParseError;
+    }
+
+    auto error_code = hardware_->IsPartitionUpdateValid(
+        partition.partition_name(), partition.version());
+    switch (error_code) {
+      case ErrorCode::kSuccess:
+        break;
+      case ErrorCode::kPayloadTimestampError:
+        *downgrade_detected = true;
+        LOG(WARNING) << "PartitionUpdate " << partition.partition_name()
+                     << " has an older version than partition on device.";
+        break;
+      default:
+        LOG(ERROR) << "IsPartitionUpdateValid(" << partition.partition_name()
+                   << ") returned" << utils::ErrorCodeToString(error_code);
+        break;
+    }
+    return error_code;
+  };
+
+  bool downgrade_detected = false;
+
+  if (is_partial_update) {
+    // for partial updates, all partition MUST have valid timestamps
+    // But max_timestamp can be empty
+    for (const auto& partition : partitions) {
+      auto error_code = timestamp_valid(
+          partition, false /* allow_empty_version */, &downgrade_detected);
+      if (error_code != ErrorCode::kSuccess &&
+          error_code != ErrorCode::kPayloadTimestampError) {
+        return error_code;
+      }
+    }
+    if (downgrade_detected) {
+      return ErrorCode::kPayloadTimestampError;
+    }
+    return ErrorCode::kSuccess;
+  }
+
+  // For non-partial updates, check max_timestamp first.
+  if (manifest_.max_timestamp() < hardware_->GetBuildTimestamp()) {
+    LOG(ERROR) << "The current OS build timestamp ("
+               << hardware_->GetBuildTimestamp()
+               << ") is newer than the maximum timestamp in the manifest ("
+               << manifest_.max_timestamp() << ")";
+    return ErrorCode::kPayloadTimestampError;
+  }
+  // Otherwise... partitions can have empty timestamps.
+  for (const auto& partition : partitions) {
+    auto error_code = timestamp_valid(
+        partition, true /* allow_empty_version */, &downgrade_detected);
+    if (error_code != ErrorCode::kSuccess &&
+        error_code != ErrorCode::kPayloadTimestampError) {
+      return error_code;
+    }
+  }
+  if (downgrade_detected) {
+    return ErrorCode::kPayloadTimestampError;
+  }
   return ErrorCode::kSuccess;
 }
 
@@ -1660,7 +1747,7 @@ ErrorCode DeltaPerformer::ValidateOperationHash(
     // corresponding update should have been produced with the operation
     // hashes. So if it happens it means either we've turned operation hash
     // generation off in DeltaDiffGenerator or it's a regression of some sort.
-    // One caveat though: The last operation is a dummy signature operation
+    // One caveat though: The last operation is a unused signature operation
     // that doesn't have a hash at the time the manifest is created. So we
     // should not complaint about that operation. This operation can be
     // recognized by the fact that it's offset is mentioned in the manifest.
@@ -1728,6 +1815,16 @@ ErrorCode DeltaPerformer::VerifyPayload(
     return ErrorCode::kPayloadSizeMismatchError;
   }
 
+  auto [payload_verifier, perform_verification] = CreatePayloadVerifier();
+  if (!perform_verification) {
+    LOG(WARNING) << "Not verifying signed delta payload -- missing public key.";
+    return ErrorCode::kSuccess;
+  }
+  if (!payload_verifier) {
+    LOG(ERROR) << "Failed to create the payload verifier.";
+    return ErrorCode::kDownloadPayloadPubKeyVerificationError;
+  }
+
   // Verifies the payload hash.
   TEST_AND_RETURN_VAL(ErrorCode::kDownloadPayloadVerificationError,
                       !payload_hash_calculator_.raw_hash().empty());
@@ -1741,15 +1838,6 @@ ErrorCode DeltaPerformer::VerifyPayload(
   TEST_AND_RETURN_VAL(ErrorCode::kDownloadPayloadPubKeyVerificationError,
                       hash_data.size() == kSHA256Size);
 
-  auto [payload_verifier, perform_verification] = CreatePayloadVerifier();
-  if (!perform_verification) {
-    LOG(WARNING) << "Not verifying signed delta payload -- missing public key.";
-    return ErrorCode::kSuccess;
-  }
-  if (!payload_verifier) {
-    LOG(ERROR) << "Failed to create the payload verifier.";
-    return ErrorCode::kDownloadPayloadPubKeyVerificationError;
-  }
   if (!payload_verifier->VerifySignature(signatures_message_data_, hash_data)) {
     // The autoupdate_CatchBadSignatures test checks for this string
     // in log-files. Keep in sync.
@@ -1795,7 +1883,7 @@ bool DeltaPerformer::CanResumeUpdate(PrefsInterface* prefs,
       resumed_update_failures > kMaxResumedUpdateFailures)
     return false;
 
-  // Sanity check the rest.
+  // Validation check the rest.
   int64_t next_data_offset = -1;
   if (!(prefs->GetInt64(kPrefsUpdateStateNextDataOffset, &next_data_offset) &&
         next_data_offset >= 0))
