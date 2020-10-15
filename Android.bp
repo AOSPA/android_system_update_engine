@@ -124,6 +124,7 @@ cc_defaults {
         "libfec_rs",
         "libpuffpatch",
         "libverity_tree",
+        "libsnapshot_cow",
     ],
     shared_libs: [
         "libbase",
@@ -178,6 +179,9 @@ cc_library_static {
         "payload_consumer/payload_constants.cc",
         "payload_consumer/payload_metadata.cc",
         "payload_consumer/payload_verifier.cc",
+        "payload_consumer/partition_writer.cc",
+        "payload_consumer/partition_writer_factory_android.cc",
+        "payload_consumer/vabc_partition_writer.cc",
         "payload_consumer/postinstall_runner_action.cc",
         "payload_consumer/verity_writer_android.cc",
         "payload_consumer/xz_extent_writer.cc",
@@ -260,7 +264,7 @@ cc_defaults {
     ],
 
     static_libs: [
-        "libkver",
+        "gkiprops",
         "libpayload_consumer",
         "libupdate_engine_boot_control",
     ],
@@ -383,6 +387,7 @@ cc_binary {
         // We add the static versions of the shared libraries that are not installed to
         // recovery image due to size concerns. Need to include all the static library
         // dependencies of these static libraries.
+        "gkiprops",
         "libevent",
         "libmodpb64",
         "libgtest_prod",
@@ -390,7 +395,6 @@ cc_binary {
         "libbrillo-stream",
         "libbrillo",
         "libchrome",
-        "libkver",
     ],
     target: {
         recovery: {
@@ -684,12 +688,12 @@ cc_test {
         "common/utils_unittest.cc",
         "dynamic_partition_control_android_unittest.cc",
         "libcurl_http_fetcher_unittest.cc",
-        "hardware_android_unittest.cc",
         "payload_consumer/bzip_extent_writer_unittest.cc",
         "payload_consumer/cached_file_descriptor_unittest.cc",
         "payload_consumer/certificate_parser_android_unittest.cc",
         "payload_consumer/delta_performer_integration_test.cc",
         "payload_consumer/delta_performer_unittest.cc",
+        "payload_consumer/partition_writer_unittest.cc",
         "payload_consumer/download_action_android_unittest.cc",
         "payload_consumer/extent_reader_unittest.cc",
         "payload_consumer/extent_writer_unittest.cc",
@@ -752,9 +756,25 @@ sh_binary {
 // update_engine header library
 cc_library_headers {
     name: "libupdate_engine_headers",
+
+    // This header library is available to core and product modules.
+    // Right now, vendor_available is the only way to specify this.
+    // vendor modules should NOT use this library.
+    // TODO(b/150902910): change this to product_available.
+    vendor_available: true,
+
     export_include_dirs: ["."],
     apex_available: [
         "com.android.gki.*",
+        "//apex_available:platform",
     ],
     host_supported: true,
+    recovery_available: true,
+    ramdisk_available: true,
+
+    target: {
+        darwin: {
+            enabled: false,
+        },
+    }
 }

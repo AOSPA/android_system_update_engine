@@ -71,6 +71,14 @@ constexpr char kRetrfoitDynamicPartitions[] =
     "ro.boot.dynamic_partitions_retrofit";
 constexpr char kVirtualAbEnabled[] = "ro.virtual_ab.enabled";
 constexpr char kVirtualAbRetrofit[] = "ro.virtual_ab.retrofit";
+constexpr char kVirtualAbCompressionEnabled[] =
+    "ro.virtual_ab.compression.enabled";
+
+// Currently, android doesn't have a retrofit prop for VAB Compression. However,
+// struct FeatureFlag forces us to determine if a feature is 'retrofit'. So this
+// is here just to simplify code. Replace it with real retrofit prop name once
+// there is one.
+constexpr char kVirtualAbCompressionRetrofit[] = "";
 constexpr char kPostinstallFstabPrefix[] = "ro.postinstall.fstab.prefix";
 // Map timeout for dynamic partitions.
 constexpr std::chrono::milliseconds kMapTimeout{1000};
@@ -78,19 +86,15 @@ constexpr std::chrono::milliseconds kMapTimeout{1000};
 // needs to be mapped, this timeout is longer than |kMapTimeout|.
 constexpr std::chrono::milliseconds kMapSnapshotTimeout{5000};
 
-#ifdef __ANDROID_RECOVERY__
-constexpr bool kIsRecovery = true;
-#else
-constexpr bool kIsRecovery = false;
-#endif
-
 DynamicPartitionControlAndroid::~DynamicPartitionControlAndroid() {
   Cleanup();
 }
 
 static FeatureFlag GetFeatureFlag(const char* enable_prop,
                                   const char* retrofit_prop) {
-  bool retrofit = GetBoolProperty(retrofit_prop, false);
+  // Default retrofit to false if retrofit_prop is empty.
+  bool retrofit = retrofit_prop && retrofit_prop[0] != '\0' &&
+                  GetBoolProperty(retrofit_prop, false);
   bool enabled = GetBoolProperty(enable_prop, false);
   if (retrofit && !enabled) {
     LOG(ERROR) << retrofit_prop << " is true but " << enable_prop
@@ -109,7 +113,9 @@ static FeatureFlag GetFeatureFlag(const char* enable_prop,
 DynamicPartitionControlAndroid::DynamicPartitionControlAndroid()
     : dynamic_partitions_(
           GetFeatureFlag(kUseDynamicPartitions, kRetrfoitDynamicPartitions)),
-      virtual_ab_(GetFeatureFlag(kVirtualAbEnabled, kVirtualAbRetrofit)) {
+      virtual_ab_(GetFeatureFlag(kVirtualAbEnabled, kVirtualAbRetrofit)),
+      virtual_ab_compression_(GetFeatureFlag(kVirtualAbCompressionEnabled,
+                                             kVirtualAbCompressionRetrofit)) {
   if (GetVirtualAbFeatureFlag().IsEnabled()) {
     snapshot_ = SnapshotManager::New();
   } else {
@@ -124,6 +130,11 @@ FeatureFlag DynamicPartitionControlAndroid::GetDynamicPartitionsFeatureFlag() {
 
 FeatureFlag DynamicPartitionControlAndroid::GetVirtualAbFeatureFlag() {
   return virtual_ab_;
+}
+
+FeatureFlag
+DynamicPartitionControlAndroid::GetVirtualAbCompressionFeatureFlag() {
+  return virtual_ab_compression_;
 }
 
 bool DynamicPartitionControlAndroid::OptimizeOperation(
@@ -1068,7 +1079,7 @@ void DynamicPartitionControlAndroid::set_fake_mapped_devices(
 }
 
 bool DynamicPartitionControlAndroid::IsRecovery() {
-  return kIsRecovery;
+  return constants::kIsRecovery;
 }
 
 static bool IsIncrementalUpdate(const DeltaArchiveManifest& manifest) {
