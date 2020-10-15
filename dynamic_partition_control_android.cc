@@ -434,16 +434,16 @@ bool DynamicPartitionControlAndroid::PreparePartitionsForUpdate(
     return false;
   }
 
+  if (!SetTargetBuildVars(manifest)) {
+    return false;
+  }
+
   // Although the current build supports dynamic partitions, the given payload
   // doesn't use it for target partitions. This could happen when applying a
   // retrofit update. Skip updating the partition metadata for the target slot.
-  is_target_dynamic_ = !manifest.dynamic_partition_metadata().groups().empty();
   if (!is_target_dynamic_) {
     return true;
   }
-
-  target_supports_snapshot_ =
-      manifest.dynamic_partition_metadata().snapshot_enabled();
 
   if (!update)
     return true;
@@ -501,6 +501,52 @@ bool DynamicPartitionControlAndroid::PreparePartitionsForUpdate(
 
   if (required_size != nullptr) {
     *required_size = 0;
+  }
+  return true;
+}
+
+bool DynamicPartitionControlAndroid::SetTargetBuildVars(
+    const DeltaArchiveManifest& manifest) {
+  // Precondition: current build supports dynamic partition.
+  CHECK(GetDynamicPartitionsFeatureFlag().IsEnabled());
+
+  bool is_target_dynamic =
+      !manifest.dynamic_partition_metadata().groups().empty();
+  bool target_supports_snapshot =
+      manifest.dynamic_partition_metadata().snapshot_enabled();
+
+  if (manifest.partial_update()) {
+    // Partial updates requires DAP. On partial updates that does not involve
+    // dynamic partitions, groups() can be empty, so also assume
+    // is_target_dynamic in this case. This assumption should be safe because we
+    // also check target_supports_snapshot below, which presumably also implies
+    // target build supports dynamic partition.
+    if (!is_target_dynamic) {
+      LOG(INFO) << "Assuming target build supports dynamic partitions for "
+                   "partial updates.";
+      is_target_dynamic = true;
+    }
+
+    // Partial updates requires Virtual A/B. Double check that both current
+    // build and target build supports Virtual A/B.
+    if (!GetVirtualAbFeatureFlag().IsEnabled()) {
+      LOG(ERROR) << "Partial update cannot be applied on a device that does "
+                    "not support snapshots.";
+      return false;
+    }
+    if (!target_supports_snapshot) {
+      LOG(ERROR) << "Cannot apply partial update to a build that does not "
+                    "support snapshots.";
+      return false;
+    }
+  }
+
+  // Store the flags.
+  is_target_dynamic_ = is_target_dynamic;
+  // If !is_target_dynamic_, leave target_supports_snapshot_ unset because
+  // snapshots would not work without dynamic partition.
+  if (is_target_dynamic_) {
+    target_supports_snapshot_ = target_supports_snapshot;
   }
   return true;
 }
@@ -792,6 +838,11 @@ bool DynamicPartitionControlAndroid::UpdatePartitionMetadata(
     MetadataBuilder* builder,
     uint32_t target_slot,
     const DeltaArchiveManifest& manifest) {
+  // Check preconditions.
+  CHECK(!GetVirtualAbFeatureFlag().IsEnabled() || IsRecovery())
+      << "UpdatePartitionMetadata is called on a Virtual A/B device "
+         "but source partitions is not deleted. This is not allowed.";
+
   // If applying downgrade from Virtual A/B to non-Virtual A/B, the left-over
   // COW group needs to be deleted to ensure there are enough space to create
   // target partitions.
@@ -807,7 +858,12 @@ bool DynamicPartitionControlAndroid::UpdatePartitionMetadata(
 
   std::string expr;
   uint64_t allocatable_space = builder->AllocatableSpace();
-  if (!GetDynamicPartitionsFeatureFlag().IsRetrofit()) {
+  // On device retrofitting dynamic partitions, allocatable_space = super.
+  // On device launching dynamic partitions w/o VAB,
+  //   allocatable_space = super / 2.
+  // On device launching dynamic partitions with VAB, allocatable_space = super.
+  if (!GetDynamicPartitionsFeatureFlag().IsRetrofit() &&
+      !GetVirtualAbFeatureFlag().IsEnabled()) {
     allocatable_space /= 2;
     expr = "half of ";
   }
