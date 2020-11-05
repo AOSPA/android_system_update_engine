@@ -22,7 +22,6 @@
 
 #include <base/macros.h>
 #include <base/time/time.h>
-#include <gtest/gtest_prod.h>
 
 #include "update_engine/common/error_code.h"
 #include "update_engine/common/hardware.h"
@@ -68,12 +67,6 @@ class HardwareAndroid : public HardwareInterface {
       const std::string& new_version) const override;
 
  private:
-  FRIEND_TEST(HardwareAndroidTest, IsKernelUpdateValid);
-
-  // Helper for IsPartitionUpdateValid.
-  static ErrorCode IsKernelUpdateValid(const std::string& old_release,
-                                       const std::string& new_release);
-
   DISALLOW_COPY_AND_ASSIGN(HardwareAndroid);
 };
 
