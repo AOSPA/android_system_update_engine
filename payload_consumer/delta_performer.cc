@@ -41,6 +41,7 @@
 #include <puffin/puffpatch.h>
 
 #include "update_engine/common/constants.h"
+#include "update_engine/common/download_action.h"
 #include "update_engine/common/error_code.h"
 #include "update_engine/common/error_code_utils.h"
 #include "update_engine/common/hardware_interface.h"
@@ -50,7 +51,6 @@
 #include "update_engine/payload_consumer/bzip_extent_writer.h"
 #include "update_engine/payload_consumer/cached_file_descriptor.h"
 #include "update_engine/payload_consumer/certificate_parser_interface.h"
-#include "update_engine/payload_consumer/download_action.h"
 #include "update_engine/payload_consumer/extent_reader.h"
 #include "update_engine/payload_consumer/extent_writer.h"
 #include "update_engine/payload_consumer/partition_update_generator_interface.h"
@@ -277,15 +277,6 @@ void LogPartitionInfo(const vector<PartitionUpdate>& partitions) {
 
 }  // namespace
 
-uint32_t DeltaPerformer::GetMinorVersion() const {
-  if (manifest_.has_minor_version()) {
-    return manifest_.minor_version();
-  }
-  return payload_->type == InstallPayloadType::kDelta
-             ? kMaxSupportedMinorPayloadVersion
-             : kFullPayloadMinorVersion;
-}
-
 bool DeltaPerformer::IsHeaderParsed() const {
   return metadata_size_ != 0;
 }
@@ -354,6 +345,7 @@ MetadataParseResult DeltaPerformer::ParsePayloadMetadata(
                  << "Trusting metadata size in payload = " << metadata_size_;
   }
 
+  // NOLINTNEXTLINE(whitespace/braces)
   auto [payload_verifier, perform_verification] = CreatePayloadVerifier();
   if (!payload_verifier) {
     LOG(ERROR) << "Failed to create payload verifier.";
@@ -1088,13 +1080,6 @@ ErrorCode DeltaPerformer::ValidateManifest() {
     }
   }
 
-  if (manifest_.has_old_rootfs_info() || manifest_.has_new_rootfs_info() ||
-      manifest_.has_old_kernel_info() || manifest_.has_new_kernel_info() ||
-      manifest_.install_operations_size() != 0 ||
-      manifest_.kernel_install_operations_size() != 0) {
-    LOG(ERROR) << "Manifest contains deprecated fields.";
-    return ErrorCode::kPayloadMismatchedType;
-  }
   ErrorCode error_code = CheckTimestampError();
   if (error_code != ErrorCode::kSuccess) {
     if (error_code == ErrorCode::kPayloadTimestampError) {
@@ -1129,28 +1114,35 @@ ErrorCode DeltaPerformer::CheckTimestampError() const {
   auto&& timestamp_valid = [this](const PartitionUpdate& partition,
                                   bool allow_empty_version,
                                   bool* downgrade_detected) -> ErrorCode {
+    const auto& partition_name = partition.partition_name();
     if (!partition.has_version()) {
+      if (hardware_->GetVersionForLogging(partition_name).empty()) {
+        LOG(INFO) << partition_name << " does't have version, skipping "
+                  << "downgrade check.";
+        return ErrorCode::kSuccess;
+      }
+
       if (allow_empty_version) {
         return ErrorCode::kSuccess;
       }
       LOG(ERROR)
-          << "PartitionUpdate " << partition.partition_name()
-          << " does ot have a version field. Not allowed in partial updates.";
+          << "PartitionUpdate " << partition_name
+          << " doesn't have a version field. Not allowed in partial updates.";
       return ErrorCode::kDownloadManifestParseError;
     }
 
-    auto error_code = hardware_->IsPartitionUpdateValid(
-        partition.partition_name(), partition.version());
+    auto error_code =
+        hardware_->IsPartitionUpdateValid(partition_name, partition.version());
     switch (error_code) {
       case ErrorCode::kSuccess:
         break;
       case ErrorCode::kPayloadTimestampError:
         *downgrade_detected = true;
-        LOG(WARNING) << "PartitionUpdate " << partition.partition_name()
+        LOG(WARNING) << "PartitionUpdate " << partition_name
                      << " has an older version than partition on device.";
         break;
       default:
-        LOG(ERROR) << "IsPartitionUpdateValid(" << partition.partition_name()
+        LOG(ERROR) << "IsPartitionUpdateValid(" << partition_name
                    << ") returned" << utils::ErrorCodeToString(error_code);
         break;
     }
@@ -1284,6 +1276,14 @@ ErrorCode DeltaPerformer::VerifyPayload(
     return ErrorCode::kPayloadSizeMismatchError;
   }
 
+  // Verifies the payload hash.
+  TEST_AND_RETURN_VAL(ErrorCode::kDownloadPayloadVerificationError,
+                      !payload_hash_calculator_.raw_hash().empty());
+  TEST_AND_RETURN_VAL(
+      ErrorCode::kPayloadHashMismatchError,
+      payload_hash_calculator_.raw_hash() == update_check_response_hash);
+
+  // NOLINTNEXTLINE(whitespace/braces)
   auto [payload_verifier, perform_verification] = CreatePayloadVerifier();
   if (!perform_verification) {
     LOG(WARNING) << "Not verifying signed delta payload -- missing public key.";
@@ -1293,13 +1293,6 @@ ErrorCode DeltaPerformer::VerifyPayload(
     LOG(ERROR) << "Failed to create the payload verifier.";
     return ErrorCode::kDownloadPayloadPubKeyVerificationError;
   }
-
-  // Verifies the payload hash.
-  TEST_AND_RETURN_VAL(ErrorCode::kDownloadPayloadVerificationError,
-                      !payload_hash_calculator_.raw_hash().empty());
-  TEST_AND_RETURN_VAL(
-      ErrorCode::kPayloadHashMismatchError,
-      payload_hash_calculator_.raw_hash() == update_check_response_hash);
 
   TEST_AND_RETURN_VAL(ErrorCode::kSignedDeltaPayloadExpectedError,
                       !signatures_message_data_.empty());

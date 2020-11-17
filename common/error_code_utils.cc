@@ -171,6 +171,10 @@ string ErrorCodeToString(ErrorCode code) {
       return "ErrorCode::kNotEnoughSpace";
     case ErrorCode::kDeviceCorrupted:
       return "ErrorCode::kDeviceCorrupted";
+    case ErrorCode::kPackageExcludedFromUpdate:
+      return "ErrorCode::kPackageExcludedFromUpdate";
+    case ErrorCode::kPostInstallMountError:
+      return "ErrorCode::kPostInstallMountError";
       // Don't add a default case to let the compiler warn about newly added
       // error codes which should be added here.
   }
