@@ -25,6 +25,7 @@
 #include <libsnapshot/cow_writer.h>
 #include <libsnapshot/snapshot_writer.h>
 
+#include "payload_consumer/file_descriptor.h"
 #include "update_engine/aosp/dynamic_partition_control_android.h"
 #include "update_engine/common/boot_control_interface.h"
 #include "update_engine/common/dynamic_partition_control_interface.h"
@@ -69,6 +70,7 @@ class MockDynamicPartitionControlAndroid
   MOCK_METHOD(FeatureFlag, GetDynamicPartitionsFeatureFlag, (), (override));
   MOCK_METHOD(std::string, GetSuperPartitionName, (uint32_t), (override));
   MOCK_METHOD(FeatureFlag, GetVirtualAbFeatureFlag, (), (override));
+  MOCK_METHOD(FeatureFlag, GetVirtualAbCompressionFeatureFlag, (), (override));
   MOCK_METHOD(bool, FinishUpdate, (bool), (override));
   MOCK_METHOD(bool,
               GetSystemOtherPath,
@@ -90,8 +92,15 @@ class MockDynamicPartitionControlAndroid
                const std::optional<std::string>& source_path,
                bool is_append),
               (override));
+  MOCK_METHOD(FileDescriptorPtr,
+              OpenCowReader,
+              (const std::string& unsuffixed_partition_name,
+               const std::optional<std::string>& source_path,
+               bool is_append),
+              (override));
   MOCK_METHOD(bool, MapAllPartitions, (), (override));
   MOCK_METHOD(bool, UnmapAllPartitions, (), (override));
+  MOCK_METHOD(bool, IsDynamicPartition, (const std::string&), (override));
 
   void set_fake_mapped_devices(const std::set<std::string>& fake) override {
     DynamicPartitionControlAndroid::set_fake_mapped_devices(fake);
@@ -124,6 +133,8 @@ class MockDynamicPartitionControlAndroid
     return DynamicPartitionControlAndroid::PrepareDynamicPartitionsForUpdate(
         source_slot, target_slot, manifest, delete_source);
   }
+  using DynamicPartitionControlAndroid::SetSourceSlot;
+  using DynamicPartitionControlAndroid::SetTargetSlot;
 };
 
 }  // namespace chromeos_update_engine
