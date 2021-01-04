@@ -20,7 +20,9 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 import hashlib
+import io
 import struct
+import zipfile
 
 from update_payload import applier
 from update_payload import checker
@@ -119,6 +121,10 @@ class Payload(object):
       payload_file: update payload file object open for reading
       payload_file_offset: the offset of the actual payload
     """
+    if zipfile.is_zipfile(payload_file):
+      with zipfile.ZipFile(payload_file) as zfp:
+        with zfp.open("payload.bin") as payload_fp:
+          payload_file = io.BytesIO(payload_fp.read())
     self.payload_file = payload_file
     self.payload_file_offset = payload_file_offset
     self.manifest_hasher = None
@@ -225,31 +231,6 @@ class Payload(object):
     self.data_offset = self.metadata_size + self.header.metadata_signature_len
 
     self.is_init = True
-
-  def Describe(self):
-    """Emits the payload embedded description data to standard output."""
-    def _DescribeImageInfo(description, image_info):
-      """Display info about the image."""
-      def _DisplayIndentedValue(name, value):
-        print('  {:<14} {}'.format(name+':', value))
-
-      print('%s:' % description)
-      _DisplayIndentedValue('Channel', image_info.channel)
-      _DisplayIndentedValue('Board', image_info.board)
-      _DisplayIndentedValue('Version', image_info.version)
-      _DisplayIndentedValue('Key', image_info.key)
-
-      if image_info.build_channel != image_info.channel:
-        _DisplayIndentedValue('Build channel', image_info.build_channel)
-
-      if image_info.build_version != image_info.version:
-        _DisplayIndentedValue('Build version', image_info.build_version)
-
-    if self.manifest.HasField('old_image_info'):
-      _DescribeImageInfo('Old Image', self.manifest.old_image_info)
-
-    if self.manifest.HasField('new_image_info'):
-      _DescribeImageInfo('New Image', self.manifest.new_image_info)
 
   def _AssertInit(self):
     """Raises an exception if the object was not initialized."""

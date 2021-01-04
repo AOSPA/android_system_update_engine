@@ -28,9 +28,14 @@
 #include <base/bind.h>
 #include <base/files/scoped_temp_dir.h>
 #include <base/location.h>
+#if BASE_VER < 780000  // Android
 #include <base/message_loop/message_loop.h>
+#endif  // BASE_VER < 780000
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
+#if BASE_VER >= 780000  // Chrome OS
+#include <base/task/single_thread_task_executor.h>
+#endif  // BASE_VER >= 780000
 #include <base/time/time.h>
 #include <brillo/message_loops/base_message_loop.h>
 #include <brillo/message_loops/message_loop.h>
@@ -70,12 +75,16 @@ class SubprocessTest : public ::testing::Test {
     subprocess_.Init(&async_signal_handler_);
   }
 
+#if BASE_VER < 780000  // Android
   base::MessageLoopForIO base_loop_;
   brillo::BaseMessageLoop loop_{&base_loop_};
+#else   // Chrome OS
+  base::SingleThreadTaskExecutor base_loop_{base::MessagePumpType::IO};
+  brillo::BaseMessageLoop loop_{base_loop_.task_runner()};
+#endif  // BASE_VER < 780000
   brillo::AsynchronousSignalHandler async_signal_handler_;
   Subprocess subprocess_;
   unique_ptr<base::FileDescriptorWatcher::Controller> watcher_;
-
 };
 
 namespace {
@@ -280,7 +289,7 @@ TEST_F(SubprocessTest, CancelTest) {
   // This test would leak a callback that runs when the child process exits
   // unless we wait for it to run.
   brillo::MessageLoopRunUntil(
-      &loop_, TimeDelta::FromSeconds(120), base::Bind([] {
+      &loop_, TimeDelta::FromSeconds(20), base::Bind([] {
         return Subprocess::Get().subprocess_records_.empty();
       }));
   EXPECT_TRUE(Subprocess::Get().subprocess_records_.empty());

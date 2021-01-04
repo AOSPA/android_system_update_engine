@@ -36,13 +36,15 @@
 #include <gtest/gtest.h>
 
 #include "update_engine/common/constants.h"
+#include "update_engine/common/error_code.h"
 #include "update_engine/common/fake_boot_control.h"
 #include "update_engine/common/fake_hardware.h"
 #include "update_engine/common/fake_prefs.h"
+#include "update_engine/common/hardware_interface.h"
+#include "update_engine/common/mock_download_action.h"
 #include "update_engine/common/test_utils.h"
 #include "update_engine/common/utils.h"
 #include "update_engine/payload_consumer/fake_file_descriptor.h"
-#include "update_engine/payload_consumer/mock_download_action.h"
 #include "update_engine/payload_consumer/payload_constants.h"
 #include "update_engine/payload_consumer/payload_metadata.h"
 #include "update_engine/payload_generator/bzip.h"
@@ -200,7 +202,7 @@ class DeltaPerformerTest : public ::testing::Test {
                                uint64_t major_version,
                                uint32_t minor_version,
                                PartitionConfig* old_part = nullptr) {
-    test_utils::ScopedTempFile blob_file("Blob-XXXXXX");
+    ScopedTempFile blob_file("Blob-XXXXXX");
     EXPECT_TRUE(test_utils::WriteFileVector(blob_file.path(), blob_data));
 
     PayloadGenerationConfig config;
@@ -226,15 +228,15 @@ class DeltaPerformerTest : public ::testing::Test {
     new_part.path = "/dev/zero";
     new_part.size = 1234;
 
-    payload.AddPartition(*old_part, new_part, aops);
+    payload.AddPartition(*old_part, new_part, aops, {}, 0);
 
     // We include a kernel partition without operations.
     old_part->name = kPartitionNameKernel;
     new_part.name = kPartitionNameKernel;
     new_part.size = 0;
-    payload.AddPartition(*old_part, new_part, {});
+    payload.AddPartition(*old_part, new_part, {}, {}, 0);
 
-    test_utils::ScopedTempFile payload_file("Payload-XXXXXX");
+    ScopedTempFile payload_file("Payload-XXXXXX");
     string private_key =
         sign_payload ? GetBuildArtifactsPath(kUnittestPrivateKeyPath) : "";
     EXPECT_TRUE(payload.WritePayload(payload_file.path(),
@@ -285,7 +287,7 @@ class DeltaPerformerTest : public ::testing::Test {
                                   const string& source_path,
                                   const brillo::Blob& target_data,
                                   bool expect_success) {
-    test_utils::ScopedTempFile new_part("Partition-XXXXXX");
+    ScopedTempFile new_part("Partition-XXXXXX");
     EXPECT_TRUE(test_utils::WriteFileVector(new_part.path(), target_data));
 
     payload_.size = payload_data.size();
@@ -416,22 +418,7 @@ class DeltaPerformerTest : public ::testing::Test {
     EXPECT_EQ(payload_.metadata_size, performer_.metadata_size_);
   }
 
-  // Helper function to pretend that the ECC file descriptor was already opened.
-  // Returns a pointer to the created file descriptor.
-  FakeFileDescriptor* SetFakeECCFile(size_t size) {
-    EXPECT_FALSE(performer_.source_ecc_fd_) << "source_ecc_fd_ already open.";
-    FakeFileDescriptor* ret = new FakeFileDescriptor();
-    fake_ecc_fd_.reset(ret);
-    // Call open to simulate it was already opened.
-    ret->Open("", 0);
-    ret->SetFileSize(size);
-    performer_.source_ecc_fd_ = fake_ecc_fd_;
-    return ret;
-  }
 
-  uint64_t GetSourceEccRecoveredFailures() const {
-    return performer_.source_ecc_recovered_failures_;
-  }
 
   FakePrefs prefs_;
   InstallPlan install_plan_;
@@ -589,7 +576,7 @@ TEST_F(DeltaPerformerTest, SourceCopyOperationTest) {
   EXPECT_TRUE(HashCalculator::RawHashOfData(expected_data, &src_hash));
   aop.op.set_src_sha256_hash(src_hash.data(), src_hash.size());
 
-  test_utils::ScopedTempFile source("Source-XXXXXX");
+  ScopedTempFile source("Source-XXXXXX");
   EXPECT_TRUE(test_utils::WriteFileVector(source.path(), expected_data));
 
   PartitionConfig old_part(kPartitionNameRoot);
@@ -617,7 +604,7 @@ TEST_F(DeltaPerformerTest, PuffdiffOperationTest) {
   EXPECT_TRUE(HashCalculator::RawHashOfData(src, &src_hash));
   aop.op.set_src_sha256_hash(src_hash.data(), src_hash.size());
 
-  test_utils::ScopedTempFile source("Source-XXXXXX");
+  ScopedTempFile source("Source-XXXXXX");
   EXPECT_TRUE(test_utils::WriteFileVector(source.path(), src));
 
   PartitionConfig old_part(kPartitionNameRoot);
@@ -645,7 +632,7 @@ TEST_F(DeltaPerformerTest, SourceHashMismatchTest) {
   EXPECT_TRUE(HashCalculator::RawHashOfData(expected_data, &src_hash));
   aop.op.set_src_sha256_hash(src_hash.data(), src_hash.size());
 
-  test_utils::ScopedTempFile source("Source-XXXXXX");
+  ScopedTempFile source("Source-XXXXXX");
   EXPECT_TRUE(test_utils::WriteFileVector(source.path(), actual_data));
 
   PartitionConfig old_part(kPartitionNameRoot);
@@ -656,95 +643,6 @@ TEST_F(DeltaPerformerTest, SourceHashMismatchTest) {
       GeneratePayload(brillo::Blob(), {aop}, false, &old_part);
 
   EXPECT_EQ(actual_data, ApplyPayload(payload_data, source.path(), false));
-}
-
-// Test that the error-corrected file descriptor is used to read the partition
-// since the source partition doesn't match the operation hash.
-TEST_F(DeltaPerformerTest, ErrorCorrectionSourceCopyFallbackTest) {
-  constexpr size_t kCopyOperationSize = 4 * 4096;
-  test_utils::ScopedTempFile source("Source-XXXXXX");
-  // Write invalid data to the source image, which doesn't match the expected
-  // hash.
-  brillo::Blob invalid_data(kCopyOperationSize, 0x55);
-  EXPECT_TRUE(test_utils::WriteFileVector(source.path(), invalid_data));
-
-  // Setup the fec file descriptor as the fake stream, which matches
-  // |expected_data|.
-  FakeFileDescriptor* fake_fec = SetFakeECCFile(kCopyOperationSize);
-  brillo::Blob expected_data = FakeFileDescriptorData(kCopyOperationSize);
-
-  PartitionConfig old_part(kPartitionNameRoot);
-  old_part.path = source.path();
-  old_part.size = invalid_data.size();
-
-  brillo::Blob payload_data =
-      GenerateSourceCopyPayload(expected_data, true, &old_part);
-  EXPECT_EQ(expected_data, ApplyPayload(payload_data, source.path(), true));
-  // Verify that the fake_fec was actually used.
-  EXPECT_EQ(1U, fake_fec->GetReadOps().size());
-  EXPECT_EQ(1U, GetSourceEccRecoveredFailures());
-}
-
-// Test that the error-corrected file descriptor is used to read a partition
-// when no hash is available for SOURCE_COPY but it falls back to the normal
-// file descriptor when the size of the error corrected one is too small.
-TEST_F(DeltaPerformerTest, ErrorCorrectionSourceCopyWhenNoHashFallbackTest) {
-  constexpr size_t kCopyOperationSize = 4 * 4096;
-  test_utils::ScopedTempFile source("Source-XXXXXX");
-  // Setup the source path with the right expected data.
-  brillo::Blob expected_data = FakeFileDescriptorData(kCopyOperationSize);
-  EXPECT_TRUE(test_utils::WriteFileVector(source.path(), expected_data));
-
-  // Setup the fec file descriptor as the fake stream, with smaller data than
-  // the expected.
-  FakeFileDescriptor* fake_fec = SetFakeECCFile(kCopyOperationSize / 2);
-
-  PartitionConfig old_part(kPartitionNameRoot);
-  old_part.path = source.path();
-  old_part.size = expected_data.size();
-
-  // The payload operation doesn't include an operation hash.
-  brillo::Blob payload_data =
-      GenerateSourceCopyPayload(expected_data, false, &old_part);
-  EXPECT_EQ(expected_data, ApplyPayload(payload_data, source.path(), true));
-  // Verify that the fake_fec was attempted to be used. Since the file
-  // descriptor is shorter it can actually do more than one read to realize it
-  // reached the EOF.
-  EXPECT_LE(1U, fake_fec->GetReadOps().size());
-  // This fallback doesn't count as an error-corrected operation since the
-  // operation hash was not available.
-  EXPECT_EQ(0U, GetSourceEccRecoveredFailures());
-}
-
-TEST_F(DeltaPerformerTest, ChooseSourceFDTest) {
-  constexpr size_t kSourceSize = 4 * 4096;
-  test_utils::ScopedTempFile source("Source-XXXXXX");
-  // Write invalid data to the source image, which doesn't match the expected
-  // hash.
-  brillo::Blob invalid_data(kSourceSize, 0x55);
-  EXPECT_TRUE(test_utils::WriteFileVector(source.path(), invalid_data));
-
-  performer_.source_fd_ = std::make_shared<EintrSafeFileDescriptor>();
-  performer_.source_fd_->Open(source.path().c_str(), O_RDONLY);
-  performer_.block_size_ = 4096;
-
-  // Setup the fec file descriptor as the fake stream, which matches
-  // |expected_data|.
-  FakeFileDescriptor* fake_fec = SetFakeECCFile(kSourceSize);
-  brillo::Blob expected_data = FakeFileDescriptorData(kSourceSize);
-
-  InstallOperation op;
-  *(op.add_src_extents()) = ExtentForRange(0, kSourceSize / 4096);
-  brillo::Blob src_hash;
-  EXPECT_TRUE(HashCalculator::RawHashOfData(expected_data, &src_hash));
-  op.set_src_sha256_hash(src_hash.data(), src_hash.size());
-
-  ErrorCode error = ErrorCode::kSuccess;
-  EXPECT_EQ(performer_.source_ecc_fd_, performer_.ChooseSourceFD(op, &error));
-  EXPECT_EQ(ErrorCode::kSuccess, error);
-  // Verify that the fake_fec was actually used.
-  EXPECT_EQ(1U, fake_fec->GetReadOps().size());
-  EXPECT_EQ(1U, GetSourceEccRecoveredFailures());
 }
 
 TEST_F(DeltaPerformerTest, ExtentsToByteStringTest) {
@@ -897,6 +795,24 @@ TEST_F(DeltaPerformerTest, ValidateManifestDowngrade) {
                         kMaxSupportedMajorPayloadVersion,
                         InstallPayloadType::kFull,
                         ErrorCode::kPayloadTimestampError);
+}
+
+TEST_F(DeltaPerformerTest, ValidatePerPartitionTimestampSuccess) {
+  // The Manifest we are validating.
+  DeltaArchiveManifest manifest;
+
+  manifest.set_minor_version(kFullPayloadMinorVersion);
+  manifest.set_max_timestamp(2);
+  fake_hardware_.SetBuildTimestamp(1);
+  auto& partition = *manifest.add_partitions();
+  partition.set_version("10");
+  partition.set_partition_name("system");
+  fake_hardware_.SetVersion("system", "5");
+
+  RunManifestValidation(manifest,
+                        kMaxSupportedMajorPayloadVersion,
+                        InstallPayloadType::kFull,
+                        ErrorCode::kSuccess);
 }
 
 TEST_F(DeltaPerformerTest, BrilloMetadataSignatureSizeTest) {

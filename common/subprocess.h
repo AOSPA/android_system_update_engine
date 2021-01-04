@@ -30,9 +30,14 @@
 #include <base/macros.h>
 #include <brillo/asynchronous_signal_handler_interface.h>
 #include <brillo/message_loops/message_loop.h>
+#ifdef __CHROMEOS__
+#include <brillo/process/process.h>
+#include <brillo/process/process_reaper.h>
+#else
 #include <brillo/process.h>
 #include <brillo/process_reaper.h>
-#include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#endif  // __CHROMEOS__
+#include <gtest/gtest_prod.h>
 
 // The Subprocess class is a singleton. It's used to spawn off a subprocess
 // and get notified when the subprocess exits. The result of Exec() can

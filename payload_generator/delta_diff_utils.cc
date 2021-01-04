@@ -708,15 +708,15 @@ bool ReadExtentsToDiff(const string& old_part,
       version.OperationAllowed(InstallOperation::SOURCE_BSDIFF);
   if (bsdiff_allowed &&
       blocks_to_read * kBlockSize > kMaxBsdiffDestinationSize) {
-    LOG(INFO) << "bsdiff blacklisted, data too big: "
-              << blocks_to_read * kBlockSize << " bytes";
+    LOG(INFO) << "bsdiff ignored, data too big: " << blocks_to_read * kBlockSize
+              << " bytes";
     bsdiff_allowed = false;
   }
 
   bool puffdiff_allowed = version.OperationAllowed(InstallOperation::PUFFDIFF);
   if (puffdiff_allowed &&
       blocks_to_read * kBlockSize > kMaxPuffdiffDestinationSize) {
-    LOG(INFO) << "puffdiff blacklisted, data too big: "
+    LOG(INFO) << "puffdiff ignored, data too big: "
               << blocks_to_read * kBlockSize << " bytes";
     puffdiff_allowed = false;
   }
@@ -822,17 +822,13 @@ bool ReadExtentsToDiff(const string& old_part,
         // Only Puffdiff if both files have at least one deflate left.
         if (!src_deflates.empty() && !dst_deflates.empty()) {
           brillo::Blob puffdiff_delta;
-          string temp_file_path;
-          TEST_AND_RETURN_FALSE(utils::MakeTempFile(
-              "puffdiff-delta.XXXXXX", &temp_file_path, nullptr));
-          ScopedPathUnlinker temp_file_unlinker(temp_file_path);
-
+          ScopedTempFile temp_file("puffdiff-delta.XXXXXX");
           // Perform PuffDiff operation.
           TEST_AND_RETURN_FALSE(puffin::PuffDiff(old_data,
                                                  new_data,
                                                  src_deflates,
                                                  dst_deflates,
-                                                 temp_file_path,
+                                                 temp_file.path(),
                                                  &puffdiff_delta));
           TEST_AND_RETURN_FALSE(puffdiff_delta.size() > 0);
           if (IsDiffOperationBetter(operation,
@@ -938,7 +934,7 @@ bool IsExtFilesystem(const string& device) {
   if (magic != EXT2_SUPER_MAGIC)
     return false;
 
-  // Sanity check the parameters.
+  // Validation check the parameters.
   TEST_AND_RETURN_FALSE(log_block_size >= EXT2_MIN_BLOCK_LOG_SIZE &&
                         log_block_size <= EXT2_MAX_BLOCK_LOG_SIZE);
   TEST_AND_RETURN_FALSE(block_count > 0);

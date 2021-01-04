@@ -17,15 +17,18 @@
 
 """Send an A/B update to an Android device over adb."""
 
+from __future__ import print_function
 from __future__ import absolute_import
 
 import argparse
+import binascii
 import hashlib
 import logging
 import os
 import socket
 import subprocess
 import sys
+import struct
 import threading
 import xml.etree.ElementTree
 import zipfile
@@ -89,6 +92,7 @@ class AndroidOTAPackage(object):
   OTA_PAYLOAD_PROPERTIES_TXT = 'payload_properties.txt'
   SECONDARY_OTA_PAYLOAD_BIN = 'secondary/payload.bin'
   SECONDARY_OTA_PAYLOAD_PROPERTIES_TXT = 'secondary/payload_properties.txt'
+  PAYLOAD_MAGIC_HEADER = b'CrAU'
 
   def __init__(self, otafilename, secondary_payload=False):
     self.otafilename = otafilename
@@ -97,10 +101,34 @@ class AndroidOTAPackage(object):
     payload_entry = (self.SECONDARY_OTA_PAYLOAD_BIN if secondary_payload else
                      self.OTA_PAYLOAD_BIN)
     payload_info = otazip.getinfo(payload_entry)
-    self.offset = payload_info.header_offset
-    self.offset += zipfile.sizeFileHeader
-    self.offset += len(payload_info.extra) + len(payload_info.filename)
-    self.size = payload_info.file_size
+
+    if payload_info.compress_type != 0:
+      logging.error(
+          "Expected layload to be uncompressed, got compression method %d",
+          payload_info.compress_type)
+    # Don't use len(payload_info.extra). Because that returns size of extra
+    # fields in central directory. We need to look at local file directory,
+    # as these two might have different sizes.
+    with open(otafilename, "rb") as fp:
+      fp.seek(payload_info.header_offset)
+      data = fp.read(zipfile.sizeFileHeader)
+      fheader = struct.unpack(zipfile.structFileHeader, data)
+      # Last two fields of local file header are filename length and
+      # extra length
+      filename_len = fheader[-2]
+      extra_len = fheader[-1]
+      self.offset = payload_info.header_offset
+      self.offset += zipfile.sizeFileHeader
+      self.offset += filename_len + extra_len
+      self.size = payload_info.file_size
+      fp.seek(self.offset)
+      payload_header = fp.read(4)
+      if payload_header != self.PAYLOAD_MAGIC_HEADER:
+        logging.warning(
+            "Invalid header, expeted %s, got %s."
+            "Either the offset is not correct, or payload is corrupted",
+            binascii.hexlify(self.PAYLOAD_MAGIC_HEADER),
+            payload_header)
 
     property_entry = (self.SECONDARY_OTA_PAYLOAD_PROPERTIES_TXT if
                       secondary_payload else self.OTA_PAYLOAD_PROPERTIES_TXT)
@@ -278,6 +306,7 @@ class ServerThread(threading.Thread):
     logging.info('Server Terminated')
 
   def StopServer(self):
+    self._httpd.shutdown()
     self._httpd.socket.close()
 
 
@@ -291,13 +320,13 @@ def AndroidUpdateCommand(ota_filename, secondary, payload_url, extra_headers):
   """Return the command to run to start the update in the Android device."""
   ota = AndroidOTAPackage(ota_filename, secondary)
   headers = ota.properties
-  headers += 'USER_AGENT=Dalvik (something, something)\n'
-  headers += 'NETWORK_ID=0\n'
-  headers += extra_headers
+  headers += b'USER_AGENT=Dalvik (something, something)\n'
+  headers += b'NETWORK_ID=0\n'
+  headers += extra_headers.encode()
 
   return ['update_engine_client', '--update', '--follow',
           '--payload=%s' % payload_url, '--offset=%d' % ota.offset,
-          '--size=%d' % ota.size, '--headers="%s"' % headers]
+          '--size=%d' % ota.size, '--headers="%s"' % headers.decode()]
 
 
 def OmahaUpdateCommand(omaha_url):

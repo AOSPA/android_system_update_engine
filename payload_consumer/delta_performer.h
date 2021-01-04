@@ -35,6 +35,7 @@
 #include "update_engine/payload_consumer/file_descriptor.h"
 #include "update_engine/payload_consumer/file_writer.h"
 #include "update_engine/payload_consumer/install_plan.h"
+#include "update_engine/payload_consumer/partition_writer.h"
 #include "update_engine/payload_consumer/payload_metadata.h"
 #include "update_engine/payload_consumer/payload_verifier.h"
 #include "update_engine/update_metadata.pb.h"
@@ -48,7 +49,6 @@ class PrefsInterface;
 
 // This class performs the actions in a delta update synchronously. The delta
 // update itself should be passed in in chunks as it is received.
-
 class DeltaPerformer : public FileWriter {
  public:
   // Defines the granularity of progress logging in terms of how many "completed
@@ -101,10 +101,6 @@ class DeltaPerformer : public FileWriter {
   // |current_partition_|. The manifest needs to be already parsed for this to
   // work. Returns whether the required file descriptors were successfully open.
   bool OpenCurrentPartition();
-
-  // Attempt to open the error-corrected device for the current partition.
-  // Returns whether the operation succeeded.
-  bool OpenCurrentECCPartition();
 
   // Closes the current partition file descriptors if open. Returns 0 on success
   // or -errno on error.
@@ -174,10 +170,6 @@ class DeltaPerformer : public FileWriter {
   // Return true if header parsing is finished and no errors occurred.
   bool IsHeaderParsed() const;
 
-  // Returns the delta minor version. If this value is defined in the manifest,
-  // it returns that value, otherwise it returns the default value.
-  uint32_t GetMinorVersion() const;
-
   // Compare |calculated_hash| with source hash in |operation|, return false and
   // dump hash and set |error| if don't match.
   // |source_fd| is the file descriptor of the source partition.
@@ -209,7 +201,6 @@ class DeltaPerformer : public FileWriter {
   friend class DeltaPerformerIntegrationTest;
   FRIEND_TEST(DeltaPerformerTest, BrilloMetadataSignatureSizeTest);
   FRIEND_TEST(DeltaPerformerTest, BrilloParsePayloadMetadataTest);
-  FRIEND_TEST(DeltaPerformerTest, ChooseSourceFDTest);
   FRIEND_TEST(DeltaPerformerTest, UsePublicKeyFromResponse);
 
   // Parse and move the update instructions of all partitions into our local
@@ -263,13 +254,6 @@ class DeltaPerformer : public FileWriter {
   bool PerformPuffDiffOperation(const InstallOperation& operation,
                                 ErrorCode* error);
 
-  // For a given operation, choose the source fd to be used (raw device or error
-  // correction device) based on the source operation hash.
-  // Returns nullptr if the source hash mismatch cannot be corrected, and set
-  // the |error| accordingly.
-  FileDescriptorPtr ChooseSourceFD(const InstallOperation& operation,
-                                   ErrorCode* error);
-
   // Extracts the payload signature message from the current |buffer_| if the
   // offset matches the one specified by the manifest. Returns whether the
   // signature was extracted.
@@ -310,6 +294,17 @@ class DeltaPerformer : public FileWriter {
   // Also see comment for the static PreparePartitionsForUpdate().
   bool PreparePartitionsForUpdate(uint64_t* required_size);
 
+  // Check if current manifest contains timestamp errors.
+  // Return:
+  // - kSuccess if update is valid.
+  // - kPayloadTimestampError if downgrade is detected
+  // - kDownloadManifestParseError if |new_version| has an incorrect format
+  // - Other error values if the source of error is known, or kError for
+  //   a generic error on the device.
+  ErrorCode CheckTimestampError() const;
+
+  // Check if partition `part_name` is a dynamic partition.
+  bool IsDynamicPartition(const std::string& part_name);
   // Update Engine preference store.
   PrefsInterface* prefs_;
 
@@ -326,34 +321,6 @@ class DeltaPerformer : public FileWriter {
 
   // Pointer to the current payload in install_plan_.payloads.
   InstallPlan::Payload* payload_{nullptr};
-
-  // File descriptor of the source partition. Only set while updating a
-  // partition when using a delta payload.
-  FileDescriptorPtr source_fd_{nullptr};
-
-  // File descriptor of the error corrected source partition. Only set while
-  // updating partition using a delta payload for a partition where error
-  // correction is available. The size of the error corrected device is smaller
-  // than the underlying raw device, since it doesn't include the error
-  // correction blocks.
-  FileDescriptorPtr source_ecc_fd_{nullptr};
-
-  // The total number of operations that failed source hash verification but
-  // passed after falling back to the error-corrected |source_ecc_fd_| device.
-  uint64_t source_ecc_recovered_failures_{0};
-
-  // Whether opening the current partition as an error-corrected device failed.
-  // Used to avoid re-opening the same source partition if it is not actually
-  // error corrected.
-  bool source_ecc_open_failure_{false};
-
-  // File descriptor of the target partition. Only set while performing the
-  // operations of a given partition.
-  FileDescriptorPtr target_fd_{nullptr};
-
-  // Paths the |source_fd_| and |target_fd_| refer to.
-  std::string source_path_;
-  std::string target_path_;
 
   PayloadMetadata payload_metadata_;
 
@@ -375,22 +342,22 @@ class DeltaPerformer : public FileWriter {
   // otherwise 0.
   size_t num_total_operations_{0};
 
-  // The list of partitions to update as found in the manifest major version 2.
-  // When parsing an older manifest format, the information is converted over to
-  // this format instead.
+  // The list of partitions to update as found in the manifest major
+  // version 2. When parsing an older manifest format, the information is
+  // converted over to this format instead.
   std::vector<PartitionUpdate> partitions_;
 
   // Index in the list of partitions (|partitions_| member) of the current
   // partition being processed.
   size_t current_partition_{0};
 
-  // Index of the next operation to perform in the manifest. The index is linear
-  // on the total number of operation on the manifest.
+  // Index of the next operation to perform in the manifest. The index is
+  // linear on the total number of operation on the manifest.
   size_t next_operation_num_{0};
 
   // A buffer used for accumulating downloaded data. Initially, it stores the
-  // payload metadata; once that's downloaded and parsed, it stores data for the
-  // next update operation.
+  // payload metadata; once that's downloaded and parsed, it stores data for
+  // the next update operation.
   brillo::Blob buffer_;
   // Offset of buffer_ in the binary blobs section of the update.
   uint64_t buffer_offset_{0};
@@ -432,8 +399,9 @@ class DeltaPerformer : public FileWriter {
   // If |true|, the update is user initiated (vs. periodic update checks).
   bool interactive_{false};
 
-  // The timeout after which we should force emitting a progress log (constant),
-  // and the actual point in time for the next forced log to be emitted.
+  // The timeout after which we should force emitting a progress log
+  // (constant), and the actual point in time for the next forced log to be
+  // emitted.
   const base::TimeDelta forced_progress_log_wait_{
       base::TimeDelta::FromSeconds(kProgressLogTimeoutSeconds)};
   base::TimeTicks forced_progress_log_time_;
@@ -444,6 +412,10 @@ class DeltaPerformer : public FileWriter {
       base::TimeDelta::FromSeconds(kCheckpointFrequencySeconds)};
   base::TimeTicks update_checkpoint_time_;
 
+  std::unique_ptr<PartitionWriter> partition_writer_;
+
+  // List of dynamic partitions on device.
+  std::vector<std::string> dynamic_partitions_;
   DISALLOW_COPY_AND_ASSIGN(DeltaPerformer);
 };
 

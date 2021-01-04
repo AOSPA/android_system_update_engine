@@ -56,16 +56,29 @@ using std::vector;
 
 void PostinstallRunnerAction::PerformAction() {
   CHECK(HasInputObject());
+  CHECK(boot_control_);
   install_plan_ = GetInputObject();
+
+  auto dynamic_control = boot_control_->GetDynamicPartitionControl();
+  CHECK(dynamic_control);
+
+  // Mount snapshot partitions for Virtual AB Compression Compression.
+  if (dynamic_control->GetVirtualAbCompressionFeatureFlag().IsEnabled()) {
+    // Before calling MapAllPartitions to map snapshot devices, all CowWriters
+    // must be closed, and MapAllPartitions() should be called.
+    dynamic_control->UnmapAllPartitions();
+    if (!dynamic_control->MapAllPartitions()) {
+      return CompletePostinstall(ErrorCode::kPostInstallMountError);
+    }
+  }
 
   // We always powerwash when rolling back, however policy can determine
   // if this is a full/normal powerwash, or a special rollback powerwash
   // that retains a small amount of system state such as enrollment and
   // network configuration. In both cases all user accounts are deleted.
   if (install_plan_.powerwash_required || install_plan_.is_rollback) {
-    bool save_rollback_data =
-        install_plan_.is_rollback && install_plan_.rollback_data_save_requested;
-    if (hardware_->SchedulePowerwash(save_rollback_data)) {
+    if (hardware_->SchedulePowerwash(
+            install_plan_.rollback_data_save_requested)) {
       powerwash_scheduled_ = true;
     } else {
       return CompletePostinstall(ErrorCode::kPostinstallPowerwashError);
@@ -224,7 +237,6 @@ void PostinstallRunnerAction::PerformPartitionPostinstall() {
       progress_fd_,
       base::BindRepeating(&PostinstallRunnerAction::OnProgressFdReady,
                           base::Unretained(this)));
-
 }
 
 void PostinstallRunnerAction::OnProgressFdReady() {

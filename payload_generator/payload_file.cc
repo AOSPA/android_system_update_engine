@@ -64,13 +64,6 @@ bool PayloadFile::Init(const PayloadGenerationConfig& config) {
   TEST_AND_RETURN_FALSE(config.version.Validate());
   major_version_ = config.version.major;
   manifest_.set_minor_version(config.version.minor);
-
-  if (!config.source.ImageInfoIsEmpty())
-    *(manifest_.mutable_old_image_info()) = config.source.image_info;
-
-  if (!config.target.ImageInfoIsEmpty())
-    *(manifest_.mutable_new_image_info()) = config.target.image_info;
-
   manifest_.set_block_size(config.block_size);
   manifest_.set_max_timestamp(config.max_timestamp);
 
@@ -86,12 +79,17 @@ bool PayloadFile::Init(const PayloadGenerationConfig& config) {
 
 bool PayloadFile::AddPartition(const PartitionConfig& old_conf,
                                const PartitionConfig& new_conf,
-                               const vector<AnnotatedOperation>& aops) {
+                               vector<AnnotatedOperation> aops,
+                               vector<CowMergeOperation> merge_sequence,
+                               size_t cow_size) {
   Partition part;
+  part.cow_size = cow_size;
   part.name = new_conf.name;
-  part.aops = aops;
+  part.aops = std::move(aops);
+  part.cow_merge_sequence = std::move(merge_sequence);
   part.postinstall = new_conf.postinstall;
   part.verity = new_conf.verity;
+  part.version = new_conf.version;
   // Initialize the PartitionInfo objects if present.
   if (!old_conf.path.empty())
     TEST_AND_RETURN_FALSE(
@@ -107,11 +105,9 @@ bool PayloadFile::WritePayload(const string& payload_file,
                                const string& private_key_path,
                                uint64_t* metadata_size_out) {
   // Reorder the data blobs with the manifest_.
-  string ordered_blobs_path;
-  TEST_AND_RETURN_FALSE(utils::MakeTempFile(
-      "CrAU_temp_data.ordered.XXXXXX", &ordered_blobs_path, nullptr));
-  ScopedPathUnlinker ordered_blobs_unlinker(ordered_blobs_path);
-  TEST_AND_RETURN_FALSE(ReorderDataBlobs(data_blobs_path, ordered_blobs_path));
+  ScopedTempFile ordered_blobs_file("CrAU_temp_data.ordered.XXXXXX");
+  TEST_AND_RETURN_FALSE(
+      ReorderDataBlobs(data_blobs_path, ordered_blobs_file.path()));
 
   // Check that install op blobs are in order.
   uint64_t next_blob_offset = 0;
@@ -132,6 +128,12 @@ bool PayloadFile::WritePayload(const string& payload_file,
   for (const auto& part : part_vec_) {
     PartitionUpdate* partition = manifest_.add_partitions();
     partition->set_partition_name(part.name);
+    if (!part.version.empty()) {
+      partition->set_version(part.version);
+    }
+    if (part.cow_size > 0) {
+      partition->set_estimate_cow_size(part.cow_size);
+    }
     if (part.postinstall.run) {
       partition->set_run_postinstall(true);
       if (!part.postinstall.path.empty())
@@ -159,6 +161,10 @@ bool PayloadFile::WritePayload(const string& payload_file,
     for (const AnnotatedOperation& aop : part.aops) {
       *partition->add_operations() = aop.op;
     }
+    for (const auto& merge_op : part.cow_merge_sequence) {
+      *partition->add_merge_operations() = merge_op;
+    }
+
     if (part.old_info.has_size() || part.old_info.has_hash())
       *(partition->mutable_old_partition_info()) = part.old_info;
     if (part.new_info.has_size() || part.new_info.has_hash())
@@ -172,9 +178,7 @@ bool PayloadFile::WritePayload(const string& payload_file,
     TEST_AND_RETURN_FALSE(PayloadSigner::SignatureBlobLength(
         {private_key_path}, &signature_blob_length));
     PayloadSigner::AddSignatureToManifest(
-        next_blob_offset,
-        signature_blob_length,
-        &manifest_);
+        next_blob_offset, signature_blob_length, &manifest_);
   }
 
   // Serialize protobuf
@@ -230,7 +234,7 @@ bool PayloadFile::WritePayload(const string& payload_file,
 
   // Append the data blobs.
   LOG(INFO) << "Writing final delta file data blobs...";
-  int blobs_fd = open(ordered_blobs_path.c_str(), O_RDONLY, 0);
+  int blobs_fd = open(ordered_blobs_file.path().c_str(), O_RDONLY, 0);
   ScopedFdCloser blobs_fd_closer(&blobs_fd);
   TEST_AND_RETURN_FALSE(blobs_fd >= 0);
   for (;;) {

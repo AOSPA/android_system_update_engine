@@ -19,10 +19,13 @@
 
 #include <map>
 #include <string>
+#include <utility>
 
 #include <base/time/time.h>
 
+#include "update_engine/common/error_code.h"
 #include "update_engine/common/hardware_interface.h"
+#include "update_engine/common/utils.h"
 
 namespace chromeos_update_engine {
 
@@ -72,10 +75,6 @@ class FakeHardware : public HardwareInterface {
   }
 
   std::string GetHardwareClass() const override { return hardware_class_; }
-
-  std::string GetFirmwareVersion() const override { return firmware_version_; }
-
-  std::string GetECVersion() const override { return ec_version_; }
 
   std::string GetDeviceRequisition() const override {
     return device_requisition_;
@@ -173,12 +172,6 @@ class FakeHardware : public HardwareInterface {
     hardware_class_ = hardware_class;
   }
 
-  void SetFirmwareVersion(const std::string& firmware_version) {
-    firmware_version_ = firmware_version;
-  }
-
-  void SetECVersion(const std::string& ec_version) { ec_version_ = ec_version; }
-
   void SetDeviceRequisition(const std::string& requisition) {
     device_requisition_ = requisition;
   }
@@ -199,13 +192,26 @@ class FakeHardware : public HardwareInterface {
     build_timestamp_ = build_timestamp;
   }
 
-  void SetWarmReset(bool warm_reset) { warm_reset_ = warm_reset; }
+  void SetWarmReset(bool warm_reset) override { warm_reset_ = warm_reset; }
 
   // Getters to verify state.
   int GetMaxKernelKeyRollforward() const { return kernel_max_rollforward_; }
 
   bool GetIsRollbackPowerwashScheduled() const {
     return powerwash_scheduled_ && save_rollback_data_;
+  }
+  std::string GetVersionForLogging(
+      const std::string& partition_name) const override {
+    return partition_timestamps_[partition_name];
+  }
+  void SetVersion(const std::string& partition_name, std::string timestamp) {
+    partition_timestamps_[partition_name] = std::move(timestamp);
+  }
+  ErrorCode IsPartitionUpdateValid(
+      const std::string& partition_name,
+      const std::string& new_version) const override {
+    const auto old_version = GetVersionForLogging(partition_name);
+    return utils::IsTimestampNewer(old_version, new_version);
   }
 
  private:
@@ -217,8 +223,6 @@ class FakeHardware : public HardwareInterface {
   // Jan 20, 2007
   base::Time oobe_timestamp_{base::Time::FromTimeT(1169280000)};
   std::string hardware_class_{"Fake HWID BLAH-1234"};
-  std::string firmware_version_{"Fake Firmware v1.0.1"};
-  std::string ec_version_{"Fake EC v1.0a"};
   std::string device_requisition_{"fake_requisition"};
   int min_kernel_key_version_{kMinKernelKeyVersion};
   int min_firmware_key_version_{kMinFirmwareKeyVersion};
@@ -230,6 +234,7 @@ class FakeHardware : public HardwareInterface {
   int64_t build_timestamp_{0};
   bool first_active_omaha_ping_sent_{false};
   bool warm_reset_{false};
+  mutable std::map<std::string, std::string> partition_timestamps_;
 
   DISALLOW_COPY_AND_ASSIGN(FakeHardware);
 };

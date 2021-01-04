@@ -14,26 +14,29 @@
 // limitations under the License.
 //
 
+#include <map>
 #include <string>
 #include <vector>
 
+#include <base/bind.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
+#include <base/strings/string_util.h>
 #include <brillo/flag_helper.h>
 #include <brillo/key_value_store.h>
 #include <brillo/message_loops/base_message_loop.h>
 #include <xz.h>
 
+#include "update_engine/common/download_action.h"
 #include "update_engine/common/fake_boot_control.h"
 #include "update_engine/common/fake_hardware.h"
 #include "update_engine/common/file_fetcher.h"
 #include "update_engine/common/prefs.h"
 #include "update_engine/common/terminator.h"
 #include "update_engine/common/utils.h"
-#include "update_engine/payload_consumer/download_action.h"
 #include "update_engine/payload_consumer/filesystem_verifier_action.h"
 #include "update_engine/payload_consumer/payload_constants.h"
 #include "update_engine/payload_generator/delta_diff_generator.h"
@@ -47,6 +50,7 @@
 // and an output file as arguments and the path to an output file and
 // generates a delta that can be sent to Chrome OS clients.
 
+using std::map;
 using std::string;
 using std::vector;
 
@@ -69,38 +73,6 @@ void ParseSignatureSizes(const string& signature_sizes_flag,
 
     signature_sizes->push_back(size);
   }
-}
-
-bool ParseImageInfo(const string& channel,
-                    const string& board,
-                    const string& version,
-                    const string& key,
-                    const string& build_channel,
-                    const string& build_version,
-                    ImageInfo* image_info) {
-  // All of these arguments should be present or missing.
-  bool empty = channel.empty();
-
-  CHECK_EQ(channel.empty(), empty);
-  CHECK_EQ(board.empty(), empty);
-  CHECK_EQ(version.empty(), empty);
-  CHECK_EQ(key.empty(), empty);
-
-  if (empty)
-    return false;
-
-  image_info->set_channel(channel);
-  image_info->set_board(board);
-  image_info->set_version(version);
-  image_info->set_key(key);
-
-  image_info->set_build_channel(build_channel.empty() ? channel
-                                                      : build_channel);
-
-  image_info->set_build_version(build_version.empty() ? version
-                                                      : build_version);
-
-  return true;
 }
 
 void CalculateHashForSigning(const vector<size_t>& sizes,
@@ -211,8 +183,11 @@ bool ApplyPayload(const string& payload_file,
   install_plan.source_slot =
       config.is_delta ? 0 : BootControlInterface::kInvalidSlot;
   install_plan.target_slot = 1;
-  payload.type =
-      config.is_delta ? InstallPayloadType::kDelta : InstallPayloadType::kFull;
+  // For partial updates, we always write kDelta to the payload. Make it
+  // consistent for host simulation.
+  payload.type = config.is_delta || config.is_partial_update
+                     ? InstallPayloadType::kDelta
+                     : InstallPayloadType::kFull;
   payload.size = utils::FileSize(payload_file);
   // TODO(senj): This hash is only correct for unsigned payload, need to support
   // signed payload using PayloadSigner.
@@ -263,7 +238,9 @@ bool ApplyPayload(const string& payload_file,
   processor.EnqueueAction(std::move(install_plan_action));
   processor.EnqueueAction(std::move(download_action));
   processor.EnqueueAction(std::move(filesystem_verifier_action));
-  processor.StartProcessing();
+  loop.PostTask(FROM_HERE,
+                base::Bind(&ActionProcessor::StartProcessing,
+                           base::Unretained(&processor)));
   loop.Run();
   CHECK_EQ(delegate.code_, ErrorCode::kSuccess);
   LOG(INFO) << "Completed applying " << (config.is_delta ? "delta" : "full")
@@ -290,6 +267,39 @@ bool ExtractProperties(const string& payload_path,
     utils::WriteFile(
         props_file.c_str(), properties.c_str(), properties.length());
     LOG(INFO) << "Generated properties file at " << props_file;
+  }
+  return true;
+}
+
+template <typename Key, typename Val>
+string ToString(const map<Key, Val>& map) {
+  vector<string> result;
+  result.reserve(map.size());
+  for (const auto& it : map) {
+    result.emplace_back(it.first + ": " + it.second);
+  }
+  return "{" + base::JoinString(result, ",") + "}";
+}
+
+bool ParsePerPartitionTimestamps(const string& partition_timestamps,
+                                 PayloadGenerationConfig* config) {
+  base::StringPairs pairs;
+  CHECK(base::SplitStringIntoKeyValuePairs(
+      partition_timestamps, ':', ',', &pairs))
+      << "--partition_timestamps accepts commad "
+         "separated pairs. e.x. system:1234,vendor:5678";
+  map<string, string> partition_timestamps_map{
+      std::move_iterator(pairs.begin()), std::move_iterator(pairs.end())};
+  for (auto&& partition : config->target.partitions) {
+    auto&& it = partition_timestamps_map.find(partition.name);
+    if (it != partition_timestamps_map.end()) {
+      partition.version = std::move(it->second);
+      partition_timestamps_map.erase(it);
+    }
+  }
+  if (!partition_timestamps_map.empty()) {
+    LOG(ERROR) << "Unused timestamps: " << ToString(partition_timestamps_map);
+    return false;
   }
   return true;
 }
@@ -384,52 +394,12 @@ int Main(int argc, char** argv) {
                0,
                "The maximum timestamp of the OS allowed to apply this "
                "payload.");
-
-  DEFINE_string(old_channel,
-                "",
-                "The channel for the old image. 'dev-channel', 'npo-channel', "
-                "etc. Ignored, except during delta generation.");
-  DEFINE_string(old_board,
-                "",
-                "The board for the old image. 'x86-mario', 'lumpy', "
-                "etc. Ignored, except during delta generation.");
   DEFINE_string(
-      old_version, "", "The build version of the old image. 1.2.3, etc.");
-  DEFINE_string(old_key,
-                "",
-                "The key used to sign the old image. 'premp', 'mp', 'mp-v3',"
-                " etc");
-  DEFINE_string(old_build_channel,
-                "",
-                "The channel for the build of the old image. 'dev-channel', "
-                "etc, but will never contain special channels such as "
-                "'npo-channel'. Ignored, except during delta generation.");
-  DEFINE_string(old_build_version,
-                "",
-                "The version of the build containing the old image.");
+      partition_timestamps,
+      "",
+      "The per-partition maximum timestamps which the OS allowed to apply this "
+      "payload. Passed in comma separated pairs, e.x. system:1234,vendor:5678");
 
-  DEFINE_string(new_channel,
-                "",
-                "The channel for the new image. 'dev-channel', 'npo-channel', "
-                "etc. Ignored, except during delta generation.");
-  DEFINE_string(new_board,
-                "",
-                "The board for the new image. 'x86-mario', 'lumpy', "
-                "etc. Ignored, except during delta generation.");
-  DEFINE_string(
-      new_version, "", "The build version of the new image. 1.2.3, etc.");
-  DEFINE_string(new_key,
-                "",
-                "The key used to sign the new image. 'premp', 'mp', 'mp-v3',"
-                " etc");
-  DEFINE_string(new_build_channel,
-                "",
-                "The channel for the build of the new image. 'dev-channel', "
-                "etc, but will never contain special channels such as "
-                "'npo-channel'. Ignored, except during delta generation.");
-  DEFINE_string(new_build_version,
-                "",
-                "The version of the build containing the new image.");
   DEFINE_string(new_postinstall_config_file,
                 "",
                 "A config file specifying postinstall related metadata. "
@@ -460,7 +430,11 @@ int Main(int argc, char** argv) {
   Terminator::Init();
 
   logging::LoggingSettings log_settings;
+#if BASE_VER < 780000
   log_settings.log_file = "delta_generator.log";
+#else
+  log_settings.log_file_path = "delta_generator.log";
+#endif
   log_settings.logging_dest = logging::LOG_TO_SYSTEM_DEBUG_LOG;
   log_settings.lock_log = logging::LOCK_LOG_FILE;
   log_settings.delete_old = logging::APPEND_TO_OLD_LOG_FILE;
@@ -605,6 +579,10 @@ int Main(int argc, char** argv) {
     }
   }
 
+  if (FLAGS_is_partial_update) {
+    payload_config.is_partial_update = true;
+  }
+
   if (!FLAGS_in_file.empty()) {
     return ApplyPayload(FLAGS_in_file, payload_config) ? 0 : 1;
   }
@@ -633,29 +611,7 @@ int Main(int argc, char** argv) {
     CHECK(payload_config.target.ValidateDynamicPartitionMetadata());
   }
 
-  if (FLAGS_is_partial_update) {
-    payload_config.is_partial_update = true;
-  }
-
   CHECK(!FLAGS_out_file.empty());
-
-  // Ignore failures. These are optional arguments.
-  ParseImageInfo(FLAGS_new_channel,
-                 FLAGS_new_board,
-                 FLAGS_new_version,
-                 FLAGS_new_key,
-                 FLAGS_new_build_channel,
-                 FLAGS_new_build_version,
-                 &payload_config.target.image_info);
-
-  // Ignore failures. These are optional arguments.
-  ParseImageInfo(FLAGS_old_channel,
-                 FLAGS_old_board,
-                 FLAGS_old_version,
-                 FLAGS_old_key,
-                 FLAGS_old_build_channel,
-                 FLAGS_old_build_version,
-                 &payload_config.source.image_info);
 
   payload_config.rootfs_partition_size = FLAGS_rootfs_partition_size;
 
@@ -709,6 +665,10 @@ int Main(int argc, char** argv) {
   }
 
   payload_config.max_timestamp = FLAGS_max_timestamp;
+  if (!FLAGS_partition_timestamps.empty()) {
+    CHECK(ParsePerPartitionTimestamps(FLAGS_partition_timestamps,
+                                      &payload_config));
+  }
 
   if (payload_config.is_delta &&
       payload_config.version.minor >= kVerityMinorPayloadVersion)

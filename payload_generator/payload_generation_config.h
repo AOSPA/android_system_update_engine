@@ -119,6 +119,9 @@ struct PartitionConfig {
 
   // Enables the on device fec data computation by default.
   bool disable_fec_computation = false;
+
+  // Per-partition version, usually a number representing timestamp.
+  std::string version;
 };
 
 // The ImageConfig struct describes a pair of binaries kernel and rootfs and the
@@ -145,13 +148,6 @@ struct ImageConfig {
 
   // Validate |dynamic_partition_metadata| against |partitions|.
   bool ValidateDynamicPartitionMetadata() const;
-
-  // Returns whether the |image_info| field is empty.
-  bool ImageInfoIsEmpty() const;
-
-  // The ImageInfo message defined in the update_metadata.proto file describes
-  // the metadata of the image.
-  ImageInfo image_info;
 
   // The updated partitions.
   std::vector<PartitionConfig> partitions;
