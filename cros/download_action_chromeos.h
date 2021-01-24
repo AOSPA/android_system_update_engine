@@ -1,5 +1,5 @@
 //
-// Copyright (C) 2011 The Android Open Source Project
+// Copyright (C) 2020 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,8 +14,8 @@
 // limitations under the License.
 //
 
-#ifndef UPDATE_ENGINE_COMMON_DOWNLOAD_ACTION_H_
-#define UPDATE_ENGINE_COMMON_DOWNLOAD_ACTION_H_
+#ifndef UPDATE_ENGINE_COMMON_DOWNLOAD_ACTION_CHROMEOS_H_
+#define UPDATE_ENGINE_COMMON_DOWNLOAD_ACTION_CHROMEOS_H_
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -26,6 +26,7 @@
 
 #include "update_engine/common/action.h"
 #include "update_engine/common/boot_control_interface.h"
+#include "update_engine/common/download_action.h"
 #include "update_engine/common/http_fetcher.h"
 #include "update_engine/common/multi_range_http_fetcher.h"
 #include "update_engine/payload_consumer/delta_performer.h"
@@ -37,47 +38,23 @@
 
 namespace chromeos_update_engine {
 
-class DownloadActionDelegate {
- public:
-  virtual ~DownloadActionDelegate() = default;
-
-  // Called periodically after bytes are received. This method will be invoked
-  // only if the DownloadAction is running. |bytes_progressed| is the number of
-  // bytes downloaded since the last call of this method, |bytes_received|
-  // the number of bytes downloaded thus far and |total| is the number of bytes
-  // expected.
-  virtual void BytesReceived(uint64_t bytes_progressed,
-                             uint64_t bytes_received,
-                             uint64_t total) = 0;
-
-  // Returns whether the download should be canceled, in which case the
-  // |cancel_reason| error should be set to the reason why the download was
-  // canceled.
-  virtual bool ShouldCancel(ErrorCode* cancel_reason) = 0;
-
-  // Called once the complete payload has been downloaded. Note that any errors
-  // while applying or downloading the partial payload will result in this
-  // method not being called.
-  virtual void DownloadComplete() = 0;
-};
-
 class PrefsInterface;
 
-class DownloadAction : public InstallPlanAction, public HttpFetcherDelegate {
+class DownloadActionChromeos : public InstallPlanAction,
+                               public HttpFetcherDelegate {
  public:
-  // Debugging/logging
-  static std::string StaticType() { return "DownloadAction"; }
+  static std::string StaticType() { return "DownloadActionChromeos"; }
 
   // Takes ownership of the passed in HttpFetcher. Useful for testing.
   // A good calling pattern is:
-  // DownloadAction(prefs, boot_contol, hardware,
+  // DownloadActionChromeos(prefs, boot_contol, hardware, system_state,
   //                new WhateverHttpFetcher, false);
-  DownloadAction(PrefsInterface* prefs,
-                 BootControlInterface* boot_control,
-                 HardwareInterface* hardware,
-                 HttpFetcher* http_fetcher,
-                 bool interactive);
-  ~DownloadAction() override;
+  DownloadActionChromeos(PrefsInterface* prefs,
+                         BootControlInterface* boot_control,
+                         HardwareInterface* hardware,
+                         HttpFetcher* http_fetcher,
+                         bool interactive);
+  ~DownloadActionChromeos() override;
 
   // InstallPlanAction overrides.
   void PerformAction() override;
@@ -87,7 +64,7 @@ class DownloadAction : public InstallPlanAction, public HttpFetcherDelegate {
   std::string Type() const override { return StaticType(); }
 
   // Testing
-  void SetTestFileWriter(DeltaPerformer* writer) { writer_ = writer; }
+  void SetTestFileWriter(FileWriter* writer) { writer_ = writer; }
 
   int GetHTTPResponseCode() { return http_fetcher_->http_response_code(); }
 
@@ -106,7 +83,29 @@ class DownloadAction : public InstallPlanAction, public HttpFetcherDelegate {
 
   HttpFetcher* http_fetcher() { return http_fetcher_.get(); }
 
+  // Returns the p2p file id for the file being written or the empty
+  // string if we're not writing to a p2p file.
+  std::string p2p_file_id() { return p2p_file_id_; }
+
  private:
+  // Closes the file descriptor for the p2p file being written and
+  // clears |p2p_file_id_| to indicate that we're no longer sharing
+  // the file. If |delete_p2p_file| is True, also deletes the file.
+  // If there is no p2p file descriptor, this method does nothing.
+  void CloseP2PSharingFd(bool delete_p2p_file);
+
+  // Starts sharing the p2p file. Must be called before
+  // WriteToP2PFile(). Returns True if this worked.
+  bool SetupP2PSharingFd();
+
+  // Writes |length| bytes of payload from |data| into |file_offset|
+  // of the p2p file. Also does validation checks; for example ensures we
+  // don't end up with a file with holes in it.
+  //
+  // This method does nothing if SetupP2PSharingFd() hasn't been
+  // called or if CloseP2PSharingFd() has been called.
+  void WriteToP2PFile(const void* data, size_t length, off_t file_offset);
+
   // Attempt to load cached manifest data from prefs
   // return true on success, false otherwise.
   bool LoadCachedManifest(int64_t manifest_size);
@@ -117,7 +116,6 @@ class DownloadAction : public InstallPlanAction, public HttpFetcherDelegate {
   // Pointer to the current payload in install_plan_.payloads.
   InstallPlan::Payload* payload_{nullptr};
 
-  // Required pointers.
   PrefsInterface* prefs_;
   BootControlInterface* boot_control_;
   HardwareInterface* hardware_;
@@ -131,8 +129,8 @@ class DownloadAction : public InstallPlanAction, public HttpFetcherDelegate {
   bool interactive_;
 
   // The FileWriter that downloaded data should be written to. It will
-  // either point to a writer for unittest or *delta_performer_.
-  DeltaPerformer* writer_;
+  // either point to *decompressing_file_writer_ or *delta_performer_.
+  FileWriter* writer_;
 
   std::unique_ptr<DeltaPerformer> delta_performer_;
 
@@ -147,13 +145,24 @@ class DownloadAction : public InstallPlanAction, public HttpFetcherDelegate {
   uint64_t bytes_total_{0};
   bool download_active_{false};
 
+  // The file-id for the file we're sharing or the empty string
+  // if we're not using p2p to share.
+  std::string p2p_file_id_;
+
+  // The file descriptor for the p2p file used for caching the payload or -1
+  // if we're not using p2p to share.
+  int p2p_sharing_fd_;
+
+  // Set to |false| if p2p file is not visible.
+  bool p2p_visible_;
+
   // Loaded from prefs before downloading any payload.
   size_t resume_payload_index_{0};
 
   // Offset of the payload in the download URL, used by UpdateAttempterAndroid.
   int64_t base_offset_{0};
 
-  DISALLOW_COPY_AND_ASSIGN(DownloadAction);
+  DISALLOW_COPY_AND_ASSIGN(DownloadActionChromeos);
 };
 
 // We want to be sure that we're compiled with large file support on linux,
@@ -162,4 +171,4 @@ static_assert(8 == sizeof(off_t), "off_t not 64 bit");
 
 }  // namespace chromeos_update_engine
 
-#endif  // UPDATE_ENGINE_COMMON_DOWNLOAD_ACTION_H_
+#endif  // UPDATE_ENGINE_COMMON_DOWNLOAD_ACTION_CHROMEOS_H_
