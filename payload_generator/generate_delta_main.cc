@@ -224,7 +224,6 @@ bool ApplyPayload(const string& payload_file,
       std::make_unique<DownloadAction>(&prefs,
                                        &fake_boot_control,
                                        &fake_hardware,
-                                       nullptr,
                                        new FileFetcher(),
                                        true /* interactive */);
   auto filesystem_verifier_action = std::make_unique<FilesystemVerifierAction>(
@@ -411,6 +410,9 @@ int Main(int argc, char** argv) {
   DEFINE_bool(disable_fec_computation,
               false,
               "Disables the fec data computation on device.");
+  DEFINE_bool(disable_verity_computation,
+              false,
+              "Disables the verity data computation on device.");
   DEFINE_string(
       out_maximum_signature_size_file,
       "",
@@ -671,7 +673,8 @@ int Main(int argc, char** argv) {
   }
 
   if (payload_config.is_delta &&
-      payload_config.version.minor >= kVerityMinorPayloadVersion)
+      payload_config.version.minor >= kVerityMinorPayloadVersion &&
+      !FLAGS_disable_verity_computation)
     CHECK(payload_config.target.LoadVerityConfig());
 
   LOG(INFO) << "Generating " << (payload_config.is_delta ? "delta" : "full")

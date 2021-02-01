@@ -29,6 +29,12 @@
 
 namespace chromeos_update_engine {
 
+EintrSafeFileDescriptor::~EintrSafeFileDescriptor() {
+  if (IsOpen()) {
+    Close();
+  }
+}
+
 bool EintrSafeFileDescriptor::Open(const char* path, int flags, mode_t mode) {
   CHECK_EQ(fd_, -1);
   return ((fd_ = HANDLE_EINTR(open(path, flags, mode))) >= 0);
@@ -128,6 +134,7 @@ bool EintrSafeFileDescriptor::Flush() {
   CHECK_GE(fd_, 0);
   // Implemented as a No-Op, as delta_performer typically uses |O_DSYNC|, except
   // in interactive settings.
+  fsync(fd_);
   return true;
 }
 

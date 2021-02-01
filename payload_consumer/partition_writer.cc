@@ -253,27 +253,37 @@ PartitionWriter::~PartitionWriter() {
   Close();
 }
 
+bool PartitionWriter::OpenSourcePartition(uint32_t source_slot,
+                                          bool source_may_exist) {
+  source_path_.clear();
+  if (!source_may_exist) {
+    return true;
+  }
+  if (install_part_.source_size > 0 && !install_part_.source_path.empty()) {
+    source_path_ = install_part_.source_path;
+    int err;
+    source_fd_ = OpenFile(source_path_.c_str(), O_RDONLY, false, &err);
+    if (source_fd_ == nullptr) {
+      LOG(ERROR) << "Unable to open source partition " << install_part_.name
+                 << " on slot " << BootControlInterface::SlotName(source_slot)
+                 << ", file " << source_path_;
+      return false;
+    }
+  }
+  return true;
+}
+
 bool PartitionWriter::Init(const InstallPlan* install_plan,
-                           bool source_may_exist) {
+                           bool source_may_exist,
+                           size_t next_op_index) {
   const PartitionUpdate& partition = partition_update_;
   uint32_t source_slot = install_plan->source_slot;
   uint32_t target_slot = install_plan->target_slot;
+  TEST_AND_RETURN_FALSE(OpenSourcePartition(source_slot, source_may_exist));
 
   // We shouldn't open the source partition in certain cases, e.g. some dynamic
   // partitions in delta payload, partitions included in the full payload for
   // partial updates. Use the source size as the indicator.
-  if (source_may_exist && install_part_.source_size > 0) {
-    source_path_ = install_part_.source_path;
-    int err;
-    source_fd_ = OpenFile(source_path_.c_str(), O_RDONLY, false, &err);
-    if (!source_fd_) {
-      LOG(ERROR) << "Unable to open source partition "
-                 << partition.partition_name() << " on slot "
-                 << BootControlInterface::SlotName(source_slot) << ", file "
-                 << source_path_;
-      return false;
-    }
-  }
 
   target_path_ = install_part_.target_path;
   int err;
@@ -320,7 +330,7 @@ bool PartitionWriter::PerformReplaceOperation(const InstallOperation& operation,
       writer->Init(target_fd_, operation.dst_extents(), block_size_));
   TEST_AND_RETURN_FALSE(writer->Write(data, operation.data_length()));
 
-  return Flush();
+  return true;
 }
 
 bool PartitionWriter::PerformZeroOrDiscardOperation(
@@ -353,7 +363,7 @@ bool PartitionWriter::PerformZeroOrDiscardOperation(
           target_fd_, zeros.data(), chunk_length, start + offset));
     }
   }
-  return Flush();
+  return true;
 }
 
 bool PartitionWriter::PerformSourceCopyOperation(
@@ -464,7 +474,7 @@ bool PartitionWriter::PerformSourceCopyOperation(
                                                        block_size_,
                                                        nullptr));
   }
-  return Flush();
+  return true;
 }
 
 bool PartitionWriter::PerformSourceBsdiffOperation(
@@ -493,7 +503,7 @@ bool PartitionWriter::PerformSourceBsdiffOperation(
                                         std::move(dst_file),
                                         reinterpret_cast<const uint8_t*>(data),
                                         count) == 0);
-  return Flush();
+  return true;
 }
 
 bool PartitionWriter::PerformPuffDiffOperation(
@@ -525,7 +535,7 @@ bool PartitionWriter::PerformPuffDiffOperation(
                         reinterpret_cast<const uint8_t*>(data),
                         count,
                         kMaxCacheSize));
-  return Flush();
+  return true;
 }
 
 FileDescriptorPtr PartitionWriter::ChooseSourceFD(
@@ -643,12 +653,12 @@ int PartitionWriter::Close() {
   return -err;
 }
 
-std::unique_ptr<ExtentWriter> PartitionWriter::CreateBaseExtentWriter() {
-  return std::make_unique<DirectExtentWriter>();
+void PartitionWriter::CheckpointUpdateProgress(size_t next_op_index) {
+  target_fd_->Flush();
 }
 
-bool PartitionWriter::Flush() {
-  return target_fd_->Flush();
+std::unique_ptr<ExtentWriter> PartitionWriter::CreateBaseExtentWriter() {
+  return std::make_unique<DirectExtentWriter>();
 }
 
 }  // namespace chromeos_update_engine

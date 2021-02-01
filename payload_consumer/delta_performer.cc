@@ -48,6 +48,7 @@
 #include "update_engine/common/prefs_interface.h"
 #include "update_engine/common/subprocess.h"
 #include "update_engine/common/terminator.h"
+#include "update_engine/common/utils.h"
 #include "update_engine/payload_consumer/bzip_extent_writer.h"
 #include "update_engine/payload_consumer/cached_file_descriptor.h"
 #include "update_engine/payload_consumer/certificate_parser_interface.h"
@@ -197,12 +198,9 @@ bool DeltaPerformer::HandleOpResult(bool op_result,
   if (op_result)
     return true;
 
-  size_t partition_first_op_num =
-      current_partition_ ? acc_num_operations_[current_partition_ - 1] : 0;
   LOG(ERROR) << "Failed to perform " << op_type_name << " operation "
              << next_operation_num_ << ", which is the operation "
-             << next_operation_num_ - partition_first_op_num
-             << " in partition \""
+             << GetPartitionOperationNum() << " in partition \""
              << partitions_[current_partition_].partition_name() << "\"";
   if (*error == ErrorCode::kSuccess)
     *error = ErrorCode::kDownloadOperationExecutionError;
@@ -253,7 +251,17 @@ bool DeltaPerformer::OpenCurrentPartition() {
   // partial update.
   bool source_may_exist = manifest_.partial_update() ||
                           payload_->type == InstallPayloadType::kDelta;
-  return partition_writer_->Init(install_plan_, source_may_exist);
+  const size_t partition_operation_num = GetPartitionOperationNum();
+
+  TEST_AND_RETURN_FALSE(partition_writer_->Init(
+      install_plan_, source_may_exist, partition_operation_num));
+  CheckpointUpdateProgress(true);
+  return true;
+}
+
+size_t DeltaPerformer::GetPartitionOperationNum() {
+  return next_operation_num_ -
+         (current_partition_ ? acc_num_operations_[current_partition_ - 1] : 0);
 }
 
 namespace {
@@ -489,6 +497,9 @@ bool DeltaPerformer::Write(const void* bytes, size_t count, ErrorCode* error) {
     // We know there are more operations to perform because we didn't reach the
     // |num_total_operations_| limit yet.
     if (next_operation_num_ >= acc_num_operations_[current_partition_]) {
+      if (partition_writer_) {
+        TEST_AND_RETURN_FALSE(partition_writer_->FinishedInstallOps());
+      }
       CloseCurrentPartition();
       // Skip until there are operations for current_partition_.
       while (next_operation_num_ >= acc_num_operations_[current_partition_]) {
@@ -499,12 +510,9 @@ bool DeltaPerformer::Write(const void* bytes, size_t count, ErrorCode* error) {
         return false;
       }
     }
-    const size_t partition_operation_num =
-        next_operation_num_ -
-        (current_partition_ ? acc_num_operations_[current_partition_ - 1] : 0);
 
     const InstallOperation& op =
-        partitions_[current_partition_].operations(partition_operation_num);
+        partitions_[current_partition_].operations(GetPartitionOperationNum());
 
     CopyDataToBuffer(&c_bytes, &count, op.data_length());
 
@@ -1431,6 +1439,14 @@ bool DeltaPerformer::CheckpointUpdateProgress(bool force) {
     } else {
       TEST_AND_RETURN_FALSE(
           prefs_->SetInt64(kPrefsUpdateStateNextDataLength, 0));
+    }
+    if (partition_writer_) {
+      partition_writer_->CheckpointUpdateProgress(GetPartitionOperationNum());
+    } else {
+      CHECK_EQ(next_operation_num_, num_total_operations_)
+          << "Partition writer is null, we are expected to finish all "
+             "operations: "
+          << next_operation_num_ << "/" << num_total_operations_;
     }
   }
   TEST_AND_RETURN_FALSE(

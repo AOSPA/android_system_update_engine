@@ -26,6 +26,7 @@
 #include "update_engine/common/action.h"
 #include "update_engine/common/cleanup_previous_update_action_delegate.h"
 #include "update_engine/common/error_code.h"
+#include "update_engine/common/prefs_interface.h"
 #include "update_engine/payload_consumer/file_descriptor.h"
 #include "update_engine/update_metadata.pb.h"
 
@@ -35,6 +36,12 @@ class ISnapshotWriter;
 }
 
 namespace chromeos_update_engine {
+
+struct PartitionDevice {
+  std::string rw_device_path;
+  std::string mountable_device_path;
+  bool is_dynamic;
+};
 
 struct FeatureFlag {
   enum class Value { NONE = 0, RETROFIT, LAUNCH };
@@ -48,7 +55,6 @@ struct FeatureFlag {
 };
 
 class BootControlInterface;
-class PrefsInterface;
 
 class DynamicPartitionControlInterface {
  public:
@@ -154,6 +160,12 @@ class DynamicPartitionControlInterface {
       const std::string& unsuffixed_partition_name,
       const std::optional<std::string>&,
       bool is_append = false) = 0;
+  virtual FileDescriptorPtr OpenCowReader(
+      const std::string& unsuffixed_partition_name,
+      const std::optional<std::string>&,
+      bool is_append = false) = 0;
+
+  virtual bool IsDynamicPartition(const std::string& part_name) = 0;
 
   // Create virtual block devices for all partitions.
   virtual bool MapAllPartitions() = 0;
