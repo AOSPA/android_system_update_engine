@@ -46,6 +46,8 @@
 #include "update_engine/aosp/cleanup_previous_update_action.h"
 #include "update_engine/aosp/dynamic_partition_utils.h"
 #include "update_engine/common/boot_control_interface.h"
+#include "update_engine/common/dynamic_partition_control_interface.h"
+#include "update_engine/common/platform_constants.h"
 #include "update_engine/common/utils.h"
 #include "update_engine/payload_consumer/delta_performer.h"
 
@@ -138,6 +140,10 @@ FeatureFlag DynamicPartitionControlAndroid::GetVirtualAbFeatureFlag() {
 
 FeatureFlag
 DynamicPartitionControlAndroid::GetVirtualAbCompressionFeatureFlag() {
+  if constexpr (constants::kIsRecovery) {
+    // Don't attempt VABC in recovery
+    return FeatureFlag(FeatureFlag::Value::NONE);
+  }
   return virtual_ab_compression_;
 }
 
@@ -961,7 +967,8 @@ bool DynamicPartitionControlAndroid::GetPartitionDevice(
     bool not_in_payload,
     std::string* device,
     bool* is_dynamic) {
-  auto partition_dev = GetPartitionDevice(partition_name, slot, current_slot);
+  auto partition_dev =
+      GetPartitionDevice(partition_name, slot, current_slot, not_in_payload);
   if (!partition_dev.has_value()) {
     return false;
   }
