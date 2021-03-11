@@ -58,7 +58,9 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   bool ResetUpdate(PrefsInterface* prefs) override;
 
   bool ListDynamicPartitionsForSlot(
-      uint32_t current_slot, std::vector<std::string>* partitions) override;
+      uint32_t slot,
+      uint32_t current_slot,
+      std::vector<std::string>* partitions) override;
 
   bool VerifyExtentsForUntouchedPartitions(
       uint32_t source_slot,
@@ -104,6 +106,8 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
   bool UnmapAllPartitions() override;
 
   bool IsDynamicPartition(const std::string& part_name) override;
+
+  bool UpdateUsesSnapshotCompression() override;
 
  protected:
   // These functions are exposed for testing.
