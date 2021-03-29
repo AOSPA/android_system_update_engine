@@ -402,7 +402,8 @@ TEST_P(DynamicPartitionControlAndroidTestP, GetMountableDevicePath) {
       .WillByDefault(Return(FeatureFlag(FeatureFlag::Value::NONE)));
   ON_CALL(dynamicControl(), UpdateUsesSnapshotCompression())
       .WillByDefault(Return(false));
-  ON_CALL(dynamicControl(), IsDynamicPartition(_)).WillByDefault(Return(true));
+  ON_CALL(dynamicControl(), IsDynamicPartition(_, _))
+      .WillByDefault(Return(true));
 
   EXPECT_CALL(dynamicControl(),
               DeviceExists(AnyOf(GetDevice(S("vendor")),
@@ -442,7 +443,7 @@ TEST_P(DynamicPartitionControlAndroidTestP, GetMountableDevicePathVABC) {
       .WillByDefault(Return(FeatureFlag(FeatureFlag::Value::LAUNCH)));
   ON_CALL(dynamicControl(), UpdateUsesSnapshotCompression())
       .WillByDefault(Return(true));
-  EXPECT_CALL(dynamicControl(), IsDynamicPartition(_))
+  EXPECT_CALL(dynamicControl(), IsDynamicPartition(_, _))
       .Times(AtLeast(1))
       .WillRepeatedly(Return(true));
 
@@ -1050,6 +1051,7 @@ class SnapshotPartitionTestP : public DynamicPartitionControlAndroidTestP {
 // Test happy path of PreparePartitionsForUpdate on a Virtual A/B device.
 TEST_P(SnapshotPartitionTestP, PreparePartitions) {
   ExpectCreateUpdateSnapshots(android::snapshot::Return::Ok());
+  SetMetadata(source(), {});
   uint64_t required_size = 0;
   EXPECT_TRUE(PreparePartitionsForUpdate(&required_size));
   EXPECT_EQ(0u, required_size);
@@ -1060,6 +1062,8 @@ TEST_P(SnapshotPartitionTestP, PreparePartitions) {
 TEST_P(SnapshotPartitionTestP, PreparePartitionsNoSpace) {
   ExpectCreateUpdateSnapshots(android::snapshot::Return::NoSpace(1_GiB));
   uint64_t required_size = 0;
+
+  SetMetadata(source(), {});
   EXPECT_FALSE(PreparePartitionsForUpdate(&required_size));
   EXPECT_EQ(1_GiB, required_size);
 }
@@ -1069,6 +1073,10 @@ TEST_P(SnapshotPartitionTestP, PreparePartitionsNoSpace) {
 TEST_P(SnapshotPartitionTestP, RecoveryUseSuperEmpty) {
   ExpectCreateUpdateSnapshots(android::snapshot::Return::Ok());
   EXPECT_CALL(dynamicControl(), IsRecovery()).WillRepeatedly(Return(true));
+
+  // Metadata is needed to perform super partition size check.
+  SetMetadata(source(), {});
+
   // Must not call PrepareDynamicPartitionsForUpdate if
   // PrepareSnapshotPartitionsForUpdate succeeds.
   EXPECT_CALL(dynamicControl(), PrepareDynamicPartitionsForUpdate(_, _, _, _))
