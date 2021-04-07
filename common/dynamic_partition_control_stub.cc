@@ -73,7 +73,9 @@ bool DynamicPartitionControlStub::ResetUpdate(PrefsInterface* prefs) {
 }
 
 bool DynamicPartitionControlStub::ListDynamicPartitionsForSlot(
-    uint32_t current_slot, std::vector<std::string>* partitions) {
+    uint32_t slot,
+    uint32_t current_slot,
+    std::vector<std::string>* partitions) {
   return true;
 }
 
@@ -113,6 +115,10 @@ bool DynamicPartitionControlStub::UnmapAllPartitions() {
 
 bool DynamicPartitionControlStub::IsDynamicPartition(
     const std::string& part_name) {
+  return false;
+}
+
+bool DynamicPartitionControlStub::UpdateUsesSnapshotCompression() {
   return false;
 }
 

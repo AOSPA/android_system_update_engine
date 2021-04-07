@@ -140,7 +140,8 @@ UpdateAttempterAndroid::UpdateAttempterAndroid(
       hardware_(hardware),
       processor_(new ActionProcessor()),
       clock_(new Clock()) {
-  metrics_reporter_ = metrics::CreateMetricsReporter();
+  metrics_reporter_ = metrics::CreateMetricsReporter(
+      boot_control_->GetDynamicPartitionControl());
   network_selector_ = network::CreateNetworkSelector();
 }
 
@@ -181,7 +182,7 @@ bool UpdateAttempterAndroid::ApplyPayload(
     return LogAndSetError(
         error, FROM_HERE, "Already processing an update, cancel it first.");
   }
-  DCHECK(status_ == UpdateStatus::IDLE);
+  DCHECK_EQ(status_, UpdateStatus::IDLE);
 
   std::map<string, string> headers;
   if (!ParseKeyValuePairHeaders(key_value_pair_headers, &headers, error)) {
@@ -317,6 +318,18 @@ bool UpdateAttempterAndroid::ApplyPayload(
     int64_t payload_size,
     const vector<string>& key_value_pair_headers,
     brillo::ErrorPtr* error) {
+  // update_engine state must be checked before modifying payload_fd_ otherwise
+  // already running update will be terminated (existing file descriptor will be closed)
+  if (status_ == UpdateStatus::UPDATED_NEED_REBOOT) {
+    return LogAndSetError(
+        error, FROM_HERE, "An update already applied, waiting for reboot");
+  }
+  if (processor_->IsRunning()) {
+    return LogAndSetError(
+        error, FROM_HERE, "Already processing an update, cancel it first.");
+  }
+  DCHECK_EQ(status_, UpdateStatus::IDLE);
+
   payload_fd_.reset(dup(fd));
   const string payload_url = "fd://" + std::to_string(payload_fd_.get());
 

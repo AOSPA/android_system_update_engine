@@ -270,10 +270,11 @@ void CleanupPreviousUpdateAction::ScheduleWaitForMerge() {
 void CleanupPreviousUpdateAction::WaitForMergeOrSchedule() {
   AcknowledgeTaskExecuted();
   TEST_AND_RETURN(running_);
+  auto update_uses_compression = snapshot_->UpdateUsesCompression();
   auto state = snapshot_->ProcessUpdateState(
       std::bind(&CleanupPreviousUpdateAction::OnMergePercentageUpdate, this),
       std::bind(&CleanupPreviousUpdateAction::BeforeCancel, this));
-  merge_stats_->set_state(state);
+  merge_stats_->set_state(state, update_uses_compression);
 
   switch (state) {
     case UpdateState::None: {
@@ -403,7 +404,7 @@ void CleanupPreviousUpdateAction::InitiateMergeAndWait() {
 
   LOG(WARNING) << "InitiateMerge failed.";
   auto state = snapshot_->GetUpdateState();
-  merge_stats_->set_state(state);
+  merge_stats_->set_state(state, snapshot_->UpdateUsesCompression());
   if (state == UpdateState::Unverified) {
     // We are stuck at unverified state. This can happen if the update has
     // been applied, but it has not even been attempted yet (in libsnapshot,
@@ -456,6 +457,13 @@ void CleanupPreviousUpdateAction::ReportMergeStats() {
   bool vab_retrofit = boot_control_->GetDynamicPartitionControl()
                           ->GetVirtualAbFeatureFlag()
                           .IsRetrofit();
+  bool vab_compression_enabled = boot_control_->GetDynamicPartitionControl()
+                                     ->GetVirtualAbCompressionFeatureFlag()
+                                     .IsEnabled();
+  // The snapshot has been merged, so we can no longer call
+  // DynamicPartitionControlInterface::UpdateUsesSnapshotCompression.
+  // However, we have saved the flag in the snapshot report.
+  bool vab_compression_used = report.compression_enabled();
 
   LOG(INFO) << "Reporting merge stats: "
             << android::snapshot::UpdateState_Name(report.state()) << " in "
@@ -467,7 +475,9 @@ void CleanupPreviousUpdateAction::ReportMergeStats() {
                              static_cast<int64_t>(passed_ms.count()),
                              static_cast<int32_t>(report.resume_count()),
                              vab_retrofit,
-                             static_cast<int64_t>(report.cow_file_size()));
+                             static_cast<int64_t>(report.cow_file_size()),
+                             vab_compression_enabled,
+                             vab_compression_used);
 #endif
 }
 
