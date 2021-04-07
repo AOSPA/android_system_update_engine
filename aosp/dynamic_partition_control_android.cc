@@ -49,6 +49,7 @@
 #include "update_engine/common/dynamic_partition_control_interface.h"
 #include "update_engine/common/platform_constants.h"
 #include "update_engine/common/utils.h"
+#include "update_engine/payload_consumer/cow_writer_file_descriptor.h"
 #include "update_engine/payload_consumer/delta_performer.h"
 
 using android::base::GetBoolProperty;
@@ -116,12 +117,14 @@ static FeatureFlag GetFeatureFlag(const char* enable_prop,
   return FeatureFlag(FeatureFlag::Value::NONE);
 }
 
-DynamicPartitionControlAndroid::DynamicPartitionControlAndroid()
+DynamicPartitionControlAndroid::DynamicPartitionControlAndroid(
+    uint32_t source_slot)
     : dynamic_partitions_(
           GetFeatureFlag(kUseDynamicPartitions, kRetrfoitDynamicPartitions)),
       virtual_ab_(GetFeatureFlag(kVirtualAbEnabled, kVirtualAbRetrofit)),
       virtual_ab_compression_(GetFeatureFlag(kVirtualAbCompressionEnabled,
-                                             kVirtualAbCompressionRetrofit)) {
+                                             kVirtualAbCompressionRetrofit)),
+      source_slot_(source_slot) {
   if (GetVirtualAbFeatureFlag().IsEnabled()) {
     snapshot_ = SnapshotManager::New();
   } else {
@@ -281,6 +284,7 @@ bool DynamicPartitionControlAndroid::UnmapPartitionOnDeviceMapper(
 }
 
 bool DynamicPartitionControlAndroid::UnmapAllPartitions() {
+  snapshot_->UnmapAllSnapshots();
   if (mapped_devices_.empty()) {
     return false;
   }
@@ -801,9 +805,7 @@ bool DynamicPartitionControlAndroid::PrepareDynamicPartitionsForUpdate(
   }
 
   std::string device_dir_str;
-  if (!GetDeviceDir(&device_dir_str)) {
-    return false;
-  }
+  TEST_AND_RETURN_FALSE(GetDeviceDir(&device_dir_str));
   base::FilePath device_dir(device_dir_str);
   auto source_device =
       device_dir.Append(GetSuperPartitionName(source_slot)).value();
@@ -820,13 +822,44 @@ bool DynamicPartitionControlAndroid::PrepareDynamicPartitionsForUpdate(
         DeleteSourcePartitions(builder.get(), source_slot, manifest));
   }
 
-  if (!UpdatePartitionMetadata(builder.get(), target_slot, manifest)) {
-    return false;
-  }
+  TEST_AND_RETURN_FALSE(
+      UpdatePartitionMetadata(builder.get(), target_slot, manifest));
 
   auto target_device =
       device_dir.Append(GetSuperPartitionName(target_slot)).value();
   return StoreMetadata(target_device, builder.get(), target_slot);
+}
+
+bool DynamicPartitionControlAndroid::CheckSuperPartitionAllocatableSpace(
+    android::fs_mgr::MetadataBuilder* builder,
+    const DeltaArchiveManifest& manifest,
+    bool use_snapshot) {
+  uint64_t total_size = 0;
+  for (const auto& group : manifest.dynamic_partition_metadata().groups()) {
+    total_size += group.size();
+  }
+
+  std::string expr;
+  uint64_t allocatable_space = builder->AllocatableSpace();
+  // On device retrofitting dynamic partitions, allocatable_space = super.
+  // On device launching dynamic partitions w/o VAB,
+  //   allocatable_space = super / 2.
+  // On device launching dynamic partitions with VAB, allocatable_space = super.
+  // For recovery sideload, allocatable_space = super.
+  if (!GetDynamicPartitionsFeatureFlag().IsRetrofit() && !use_snapshot &&
+      !IsRecovery()) {
+    allocatable_space /= 2;
+    expr = "half of ";
+  }
+  if (total_size > allocatable_space) {
+    LOG(ERROR) << "The maximum size of all groups for the target slot"
+               << " (" << total_size << ") has exceeded " << expr
+               << "allocatable space for dynamic partitions "
+               << allocatable_space << ".";
+    return false;
+  }
+
+  return true;
 }
 
 bool DynamicPartitionControlAndroid::PrepareSnapshotPartitionsForUpdate(
@@ -835,6 +868,22 @@ bool DynamicPartitionControlAndroid::PrepareSnapshotPartitionsForUpdate(
     const DeltaArchiveManifest& manifest,
     uint64_t* required_size) {
   TEST_AND_RETURN_FALSE(ExpectMetadataMounted());
+
+  std::string device_dir_str;
+  TEST_AND_RETURN_FALSE(GetDeviceDir(&device_dir_str));
+  base::FilePath device_dir(device_dir_str);
+  auto super_device =
+      device_dir.Append(GetSuperPartitionName(source_slot)).value();
+  auto builder = LoadMetadataBuilder(super_device, source_slot);
+  if (builder == nullptr) {
+    LOG(ERROR) << "No metadata at "
+               << BootControlInterface::SlotName(source_slot);
+    return false;
+  }
+
+  TEST_AND_RETURN_FALSE(
+      CheckSuperPartitionAllocatableSpace(builder.get(), manifest, true));
+
   if (!snapshot_->BeginUpdate()) {
     LOG(ERROR) << "Cannot begin new update.";
     return false;
@@ -861,7 +910,7 @@ bool DynamicPartitionControlAndroid::UpdatePartitionMetadata(
     uint32_t target_slot,
     const DeltaArchiveManifest& manifest) {
   // Check preconditions.
-  CHECK(!GetVirtualAbFeatureFlag().IsEnabled() || IsRecovery())
+  LOG_IF(WARNING, !GetVirtualAbFeatureFlag().IsEnabled() || IsRecovery())
       << "UpdatePartitionMetadata is called on a Virtual A/B device "
          "but source partitions is not deleted. This is not allowed.";
 
@@ -873,29 +922,8 @@ bool DynamicPartitionControlAndroid::UpdatePartitionMetadata(
   const std::string target_suffix = SlotSuffixForSlotNumber(target_slot);
   DeleteGroupsWithSuffix(builder, target_suffix);
 
-  uint64_t total_size = 0;
-  for (const auto& group : manifest.dynamic_partition_metadata().groups()) {
-    total_size += group.size();
-  }
-
-  std::string expr;
-  uint64_t allocatable_space = builder->AllocatableSpace();
-  // On device retrofitting dynamic partitions, allocatable_space = super.
-  // On device launching dynamic partitions w/o VAB,
-  //   allocatable_space = super / 2.
-  // On device launching dynamic partitions with VAB, allocatable_space = super.
-  if (!GetDynamicPartitionsFeatureFlag().IsRetrofit() &&
-      !GetVirtualAbFeatureFlag().IsEnabled()) {
-    allocatable_space /= 2;
-    expr = "half of ";
-  }
-  if (total_size > allocatable_space) {
-    LOG(ERROR) << "The maximum size of all groups with suffix " << target_suffix
-               << " (" << total_size << ") has exceeded " << expr
-               << "allocatable space for dynamic partitions "
-               << allocatable_space << ".";
-    return false;
-  }
+  TEST_AND_RETURN_FALSE(
+      CheckSuperPartitionAllocatableSpace(builder, manifest, false));
 
   // name of partition(e.g. "system") -> size in bytes
   std::map<std::string, uint64_t> partition_sizes;
@@ -1019,8 +1047,8 @@ DynamicPartitionControlAndroid::GetPartitionDevice(
   // target slot.
   const auto& partition_name_suffix =
       partition_name + SlotSuffixForSlotNumber(slot);
-  if (UpdateUsesSnapshotCompression() && IsDynamicPartition(partition_name) &&
-      slot != current_slot) {
+  if (UpdateUsesSnapshotCompression() && slot != current_slot &&
+      IsDynamicPartition(partition_name, slot)) {
     return {
         {.mountable_device_path = base::FilePath{std::string{VABC_DEVICE_DIR}}
                                       .Append(partition_name_suffix)
@@ -1163,7 +1191,7 @@ bool DynamicPartitionControlAndroid::DeleteSourcePartitions(
 
   LOG(INFO) << "Will overwrite existing partitions. Slot "
             << BootControlInterface::SlotName(source_slot)
-            << "may be unbootable until update finishes!";
+            << " may be unbootable until update finishes!";
   const std::string source_suffix = SlotSuffixForSlotNumber(source_slot);
   DeleteGroupsWithSuffix(builder, source_suffix);
 
@@ -1211,6 +1239,14 @@ bool DynamicPartitionControlAndroid::ListDynamicPartitionsForSlot(
     uint32_t slot,
     uint32_t current_slot,
     std::vector<std::string>* partitions) {
+  CHECK(slot == source_slot_ || target_slot_ != UINT32_MAX)
+      << " source slot: " << source_slot_ << " target slot: " << target_slot_
+      << " slot: " << slot
+      << " attempting to query dynamic partition metadata for target slot "
+         "before PreparePartitionForUpdate() is called. The "
+         "metadata in target slot isn't valid until "
+         "PreparePartitionForUpdate() is called, contining execution would "
+         "likely cause problems.";
   bool slot_enables_dynamic_partitions =
       GetDynamicPartitionsFeatureFlag().IsEnabled();
   // Check if the target slot has dynamic partitions, this may happen when
@@ -1318,7 +1354,7 @@ DynamicPartitionControlAndroid::OpenCowWriter(
   return snapshot_->OpenSnapshotWriter(params, std::move(source_path));
 }  // namespace chromeos_update_engine
 
-FileDescriptorPtr DynamicPartitionControlAndroid::OpenCowReader(
+FileDescriptorPtr DynamicPartitionControlAndroid::OpenCowFd(
     const std::string& unsuffixed_partition_name,
     const std::optional<std::string>& source_path,
     bool is_append) {
@@ -1327,8 +1363,10 @@ FileDescriptorPtr DynamicPartitionControlAndroid::OpenCowReader(
   if (cow_writer == nullptr) {
     return nullptr;
   }
-  cow_writer->InitializeAppend(kEndOfInstallLabel);
-  return cow_writer->OpenReader();
+  if (!cow_writer->InitializeAppend(kEndOfInstallLabel)) {
+    return nullptr;
+  }
+  return std::make_shared<CowWriterFileDescriptor>(std::move(cow_writer));
 }
 
 std::optional<base::FilePath> DynamicPartitionControlAndroid::GetSuperDevice() {
@@ -1347,16 +1385,22 @@ bool DynamicPartitionControlAndroid::MapAllPartitions() {
 }
 
 bool DynamicPartitionControlAndroid::IsDynamicPartition(
-    const std::string& partition_name) {
-  if (dynamic_partition_list_.empty() &&
+    const std::string& partition_name, uint32_t slot) {
+  if (slot >= dynamic_partition_list_.size()) {
+    LOG(ERROR) << "Seeing unexpected slot # " << slot << " currently assuming "
+               << dynamic_partition_list_.size() << " slots";
+    return false;
+  }
+  auto& dynamic_partition_list = dynamic_partition_list_[slot];
+  if (dynamic_partition_list.empty() &&
       GetDynamicPartitionsFeatureFlag().IsEnabled()) {
     // Use the DAP config of the target slot.
     CHECK(ListDynamicPartitionsForSlot(
-        target_slot_, source_slot_, &dynamic_partition_list_));
+        slot, source_slot_, &dynamic_partition_list));
   }
-  return std::find(dynamic_partition_list_.begin(),
-                   dynamic_partition_list_.end(),
-                   partition_name) != dynamic_partition_list_.end();
+  return std::find(dynamic_partition_list.begin(),
+                   dynamic_partition_list.end(),
+                   partition_name) != dynamic_partition_list.end();
 }
 
 bool DynamicPartitionControlAndroid::UpdateUsesSnapshotCompression() {
