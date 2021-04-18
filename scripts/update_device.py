@@ -29,6 +29,7 @@ import socket
 import subprocess
 import sys
 import struct
+import tempfile
 import threading
 import xml.etree.ElementTree
 import zipfile
@@ -384,6 +385,28 @@ class AdbHost(object):
     return subprocess.check_output(command, universal_newlines=True)
 
 
+def PushMetadata(dut, otafile, metadata_path):
+  payload = update_payload.Payload(otafile)
+  payload.Init()
+  with tempfile.TemporaryDirectory() as tmpdir:
+    with zipfile.ZipFile(otafile, "r") as zfp:
+      extracted_path = os.path.join(tmpdir, "payload.bin")
+      with zfp.open("payload.bin") as payload_fp, \
+              open(extracted_path, "wb") as output_fp:
+          # Only extract the first |data_offset| bytes from the payload.
+          # This is because allocateSpaceForPayload only needs to see
+          # the manifest, not the entire payload.
+          # Extracting the entire payload works, but is slow for full
+          # OTA.
+        output_fp.write(payload_fp.read(payload.data_offset))
+
+      return dut.adb([
+          "push",
+          extracted_path,
+          metadata_path
+      ]) == 0
+
+
 def main():
   parser = argparse.ArgumentParser(description='Android A/B OTA helper.')
   parser.add_argument('otafile', metavar='PAYLOAD', type=str,
@@ -405,6 +428,13 @@ def main():
                       help='Update with the secondary payload in the package.')
   parser.add_argument('--no-slot-switch', action='store_true',
                       help='Do not perform slot switch after the update.')
+  parser.add_argument('--allocate_only', action='store_true',
+                      help='Allocate space for this OTA, instead of actually \
+                        applying the OTA.')
+  parser.add_argument('--verify_only', action='store_true',
+                      help='Verify metadata then exit, instead of applying the OTA.')
+  parser.add_argument('--no_care_map', action='store_true',
+                      help='Do not push care_map.pb to device.')
   args = parser.parse_args()
   logging.basicConfig(
       level=logging.WARNING if args.no_verbose else logging.INFO)
@@ -422,8 +452,37 @@ def main():
   help_cmd = ['shell', 'su', '0', 'update_engine_client', '--help']
   use_omaha = 'omaha' in dut.adb_output(help_cmd)
 
+  metadata_path = "/data/ota_package/metadata"
+  if args.allocate_only:
+    if PushMetadata(dut, args.otafile, metadata_path):
+      dut.adb([
+          "shell", "update_engine_client", "--allocate",
+          "--metadata={}".format(metadata_path)])
+    # Return 0, as we are executing ADB commands here, no work needed after
+    # this point
+    return 0
+  if args.verify_only:
+    if PushMetadata(dut, args.otafile, metadata_path):
+      dut.adb([
+          "shell", "update_engine_client", "--verify",
+          "--metadata={}".format(metadata_path)])
+    # Return 0, as we are executing ADB commands here, no work needed after
+    # this point
+    return 0
+
   if args.no_slot_switch:
     args.extra_headers += "\nSWITCH_SLOT_ON_REBOOT=0"
+
+  with zipfile.ZipFile(args.otafile) as zfp:
+    CARE_MAP_ENTRY_NAME = "care_map.pb"
+    if CARE_MAP_ENTRY_NAME in zfp.namelist() and not args.no_care_map:
+      # Need root permission to push to /data
+      dut.adb(["root"])
+      with tempfile.NamedTemporaryFile() as care_map_fp:
+        care_map_fp.write(zfp.read(CARE_MAP_ENTRY_NAME))
+        care_map_fp.flush()
+        dut.adb(["push", care_map_fp.name,
+                 "/data/ota_package/" + CARE_MAP_ENTRY_NAME])
 
   if args.file:
     # Update via pushing a file to /data.

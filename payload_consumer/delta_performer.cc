@@ -240,13 +240,13 @@ bool DeltaPerformer::OpenCurrentPartition() {
   const InstallPlan::Partition& install_part =
       install_plan_->partitions[num_previous_partitions + current_partition_];
   auto dynamic_control = boot_control_->GetDynamicPartitionControl();
-  partition_writer_ =
-      CreatePartitionWriter(partition,
-                            install_part,
-                            dynamic_control,
-                            block_size_,
-                            interactive_,
-                            IsDynamicPartition(install_part.name));
+  partition_writer_ = CreatePartitionWriter(
+      partition,
+      install_part,
+      dynamic_control,
+      block_size_,
+      interactive_,
+      IsDynamicPartition(install_part.name, install_plan_->target_slot));
   // Open source fds if we have a delta payload, or for partitions in the
   // partial update.
   bool source_may_exist = manifest_.partial_update() ||
@@ -584,6 +584,11 @@ bool DeltaPerformer::Write(const void* bytes, size_t count, ErrorCode* error) {
     CheckpointUpdateProgress(false);
   }
 
+  if (partition_writer_) {
+    TEST_AND_RETURN_FALSE(partition_writer_->FinishedInstallOps());
+  }
+  CloseCurrentPartition();
+
   // In major version 2, we don't add unused operation to the payload.
   // If we already extracted the signature we should skip this step.
   if (manifest_.has_signatures_offset() && manifest_.has_signatures_size() &&
@@ -802,6 +807,7 @@ bool DeltaPerformer::PreparePartitionsForUpdate(
   } else {
     LOG(INFO) << "Preparing partitions for new update. last hash = "
               << last_hash << ", new hash = " << update_check_response_hash;
+    ResetUpdateProgress(prefs, false);
   }
 
   if (!boot_control->GetDynamicPartitionControl()->PreparePartitionsForUpdate(
@@ -1519,9 +1525,10 @@ bool DeltaPerformer::PrimeUpdateState() {
   return true;
 }
 
-bool DeltaPerformer::IsDynamicPartition(const std::string& part_name) {
+bool DeltaPerformer::IsDynamicPartition(const std::string& part_name,
+                                        uint32_t slot) {
   return boot_control_->GetDynamicPartitionControl()->IsDynamicPartition(
-      part_name);
+      part_name, slot);
 }
 
 std::unique_ptr<PartitionWriter> DeltaPerformer::CreatePartitionWriter(
@@ -1537,7 +1544,7 @@ std::unique_ptr<PartitionWriter> DeltaPerformer::CreatePartitionWriter(
       dynamic_control,
       block_size_,
       interactive_,
-      IsDynamicPartition(install_part.name));
+      IsDynamicPartition(install_part.name, install_plan_->target_slot));
 }
 
 }  // namespace chromeos_update_engine

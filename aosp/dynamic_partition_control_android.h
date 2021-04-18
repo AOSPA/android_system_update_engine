@@ -20,6 +20,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <base/files/file_util.h>
@@ -33,7 +34,11 @@ namespace chromeos_update_engine {
 
 class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
  public:
-  DynamicPartitionControlAndroid();
+  // A directory where all partitions mapped by VABC is expected to be found.
+  // Per earlier discussion with VAB team, this directory is unlikely to change.
+  // So we declare it as a constant here.
+  static constexpr std::string_view VABC_DEVICE_DIR = "/dev/block/mapper/";
+  explicit DynamicPartitionControlAndroid(uint32_t source_slot);
   ~DynamicPartitionControlAndroid();
 
   FeatureFlag GetDynamicPartitionsFeatureFlag() override;
@@ -99,13 +104,13 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
       const std::string& unsuffixed_partition_name,
       const std::optional<std::string>& source_path,
       bool is_append) override;
-  FileDescriptorPtr OpenCowReader(const std::string& unsuffixed_partition_name,
-                                  const std::optional<std::string>&,
-                                  bool is_append = false) override;
+  FileDescriptorPtr OpenCowFd(const std::string& unsuffixed_partition_name,
+                              const std::optional<std::string>&,
+                              bool is_append = false) override;
 
   bool UnmapAllPartitions() override;
 
-  bool IsDynamicPartition(const std::string& part_name) override;
+  bool IsDynamicPartition(const std::string& part_name, uint32_t slot) override;
 
   bool UpdateUsesSnapshotCompression() override;
 
@@ -253,6 +258,13 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
                                           const DeltaArchiveManifest& manifest,
                                           uint64_t* required_size);
 
+  // Returns true if the allocatable space in super partition is larger than
+  // the size of dynamic partition groups in the manifest.
+  bool CheckSuperPartitionAllocatableSpace(
+      android::fs_mgr::MetadataBuilder* builder,
+      const DeltaArchiveManifest& manifest,
+      bool use_snapshot);
+
   enum class DynamicPartitionDeviceStatus {
     SUCCESS,
     ERROR,
@@ -324,7 +336,7 @@ class DynamicPartitionControlAndroid : public DynamicPartitionControlInterface {
 
   uint32_t source_slot_ = UINT32_MAX;
   uint32_t target_slot_ = UINT32_MAX;
-  std::vector<std::string> dynamic_partition_list_;
+  std::vector<std::vector<std::string>> dynamic_partition_list_{2UL};
 
   DISALLOW_COPY_AND_ASSIGN(DynamicPartitionControlAndroid);
 };

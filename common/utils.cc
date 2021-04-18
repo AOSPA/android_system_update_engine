@@ -28,6 +28,7 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
+#include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>

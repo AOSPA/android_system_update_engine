@@ -35,6 +35,8 @@ namespace chromeos_update_engine {
 class MockDynamicPartitionControlAndroid
     : public DynamicPartitionControlAndroid {
  public:
+  MockDynamicPartitionControlAndroid()
+      : DynamicPartitionControlAndroid(0 /*source slot*/) {}
   MOCK_METHOD(
       bool,
       MapPartitionOnDeviceMapper,
@@ -93,14 +95,17 @@ class MockDynamicPartitionControlAndroid
                bool is_append),
               (override));
   MOCK_METHOD(FileDescriptorPtr,
-              OpenCowReader,
+              OpenCowFd,
               (const std::string& unsuffixed_partition_name,
                const std::optional<std::string>& source_path,
                bool is_append),
               (override));
   MOCK_METHOD(bool, MapAllPartitions, (), (override));
   MOCK_METHOD(bool, UnmapAllPartitions, (), (override));
-  MOCK_METHOD(bool, IsDynamicPartition, (const std::string&), (override));
+  MOCK_METHOD(bool,
+              IsDynamicPartition,
+              (const std::string&, uint32_t slot),
+              (override));
   MOCK_METHOD(bool, UpdateUsesSnapshotCompression, (), (override));
 
   void set_fake_mapped_devices(const std::set<std::string>& fake) override {

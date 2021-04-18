@@ -191,11 +191,12 @@ void PostinstallRunnerAction::PerformPartitionPostinstall() {
   }
 #endif  // __ANDROID__
 
-  if (!utils::MountFilesystem(mountable_device,
-                              fs_mount_dir_,
-                              MS_RDONLY,
-                              partition.filesystem_type,
-                              constants::kPostinstallMountOptions)) {
+  if (!utils::MountFilesystem(
+          mountable_device,
+          fs_mount_dir_,
+          MS_RDONLY,
+          partition.filesystem_type,
+          hardware_->GetPartitionMountOptions(partition.name))) {
     return CompletePartitionPostinstall(
         1, "Error mounting the device " + mountable_device);
   }
@@ -400,6 +401,10 @@ void PostinstallRunnerAction::CompletePostinstall(ErrorCode error_code) {
   if (HasOutputPipe()) {
     SetOutputObject(install_plan_);
   }
+  auto dynamic_control = boot_control_->GetDynamicPartitionControl();
+  CHECK(dynamic_control);
+  dynamic_control->UnmapAllPartitions();
+  LOG(INFO) << "Unmapped all partitions.";
 }
 
 void PostinstallRunnerAction::SuspendAction() {

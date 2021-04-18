@@ -32,13 +32,46 @@
 #include <base/strings/string_util.h>
 #include <brillo/data_encoding.h>
 #include <brillo/message_loops/message_loop.h>
+#include <brillo/secure_blob.h>
 #include <brillo/streams/file_stream.h>
 
+#include "payload_generator/delta_diff_generator.h"
 #include "update_engine/common/utils.h"
 #include "update_engine/payload_consumer/file_descriptor.h"
 
 using brillo::data_encoding::Base64Encode;
 using std::string;
+
+// On a partition with verity enabled, we expect to see the following format:
+// ===================================================
+//              Normal Filesystem Data
+// (this should take most of the space, like over 90%)
+// ===================================================
+//                  Hash tree
+//         ~0.8% (e.g. 16M for 2GB image)
+// ===================================================
+//                  FEC data
+//                    ~0.8%
+// ===================================================
+//                   Footer
+//                     4K
+// ===================================================
+
+// For OTA that doesn't do on device verity computation, hash tree and fec data
+// are written during DownloadAction as a regular InstallOp, so no special
+// handling needed, we can just read the entire partition in 1 go.
+
+// Verity enabled case: Only Normal FS data is written during download action.
+// When hasing the entire partition, we will need to build the hash tree, write
+// it to disk, then build FEC, and write it to disk. Therefore, it is important
+// that we finish writing hash tree before we attempt to read & hash it. The
+// same principal applies to FEC data.
+
+// |verity_writer_| handles building and
+// writing of FEC/HashTree, we just need to be careful when reading.
+// Specifically, we must stop at beginning of Hash tree, let |verity_writer_|
+// write both hash tree and FEC, then continue reading the remaining part of
+// partition.
 
 namespace chromeos_update_engine {
 
@@ -75,8 +108,7 @@ void FilesystemVerifierAction::TerminateProcessing() {
 }
 
 void FilesystemVerifierAction::Cleanup(ErrorCode code) {
-  read_fd_.reset();
-  write_fd_.reset();
+  partition_fd_.reset();
   // This memory is not used anymore.
   buffer_.clear();
 
@@ -98,35 +130,29 @@ bool FilesystemVerifierAction::InitializeFdVABC() {
   const InstallPlan::Partition& partition =
       install_plan_.partitions[partition_index_];
 
-  read_fd_ = dynamic_control_->OpenCowReader(
-      partition.name, partition.source_path, true);
-  if (!read_fd_) {
+  // FilesystemVerifierAction need the read_fd_.
+  partition_fd_ =
+      dynamic_control_->OpenCowFd(partition.name, partition.source_path, true);
+  if (!partition_fd_) {
     LOG(ERROR) << "OpenCowReader(" << partition.name << ", "
                << partition.source_path << ") failed.";
     return false;
   }
   partition_size_ = partition.target_size;
-  // TODO(b/173432386): Support Verity writes for VABC.
-  CHECK_EQ(partition.fec_size, 0U);
-  CHECK_EQ(partition.hash_tree_size, 0U);
   return true;
 }
 
 bool FilesystemVerifierAction::InitializeFd(const std::string& part_path) {
-  read_fd_ = FileDescriptorPtr(new EintrSafeFileDescriptor());
-  if (!read_fd_->Open(part_path.c_str(), O_RDONLY)) {
+  partition_fd_ = FileDescriptorPtr(new EintrSafeFileDescriptor());
+  const bool write_verity = ShouldWriteVerity();
+  int flags = write_verity ? O_RDWR : O_RDONLY;
+  if (!utils::SetBlockDeviceReadOnly(part_path, !write_verity)) {
+    LOG(WARNING) << "Failed to set block device " << part_path << " as "
+                 << (write_verity ? "writable" : "readonly");
+  }
+  if (!partition_fd_->Open(part_path.c_str(), flags)) {
     LOG(ERROR) << "Unable to open " << part_path << " for reading.";
     return false;
-  }
-
-  // Can't re-use |read_fd_|, as verity writer may call `seek` to modify state
-  // of a file descriptor.
-  if (ShouldWriteVerity()) {
-    write_fd_ = FileDescriptorPtr(new EintrSafeFileDescriptor());
-    if (!write_fd_->Open(part_path.c_str(), O_RDWR)) {
-      LOG(ERROR) << "Unable to open " << part_path << " for Read/Write.";
-      return false;
-    }
   }
   return true;
 }
@@ -168,8 +194,9 @@ void FilesystemVerifierAction::StartPartitionHashing() {
             << partition.name << ") on device " << part_path;
   auto success = false;
   if (dynamic_control_->UpdateUsesSnapshotCompression() &&
-      dynamic_control_->IsDynamicPartition(partition.name) &&
-      verifier_step_ == VerifierStep::kVerifyTargetHash) {
+      verifier_step_ == VerifierStep::kVerifyTargetHash &&
+      dynamic_control_->IsDynamicPartition(partition.name,
+                                           install_plan_.target_slot)) {
     success = InitializeFdVABC();
   } else {
     if (part_path.empty()) {
@@ -196,15 +223,26 @@ void FilesystemVerifierAction::StartPartitionHashing() {
   hasher_ = std::make_unique<HashCalculator>();
 
   offset_ = 0;
+  filesystem_data_end_ = partition_size_;
+  CHECK_LE(partition.hash_tree_offset, partition.fec_offset)
+      << " Hash tree is expected to come before FEC data";
+  if (partition.hash_tree_offset != 0) {
+    filesystem_data_end_ = partition.hash_tree_offset;
+  } else if (partition.fec_offset != 0) {
+    filesystem_data_end_ = partition.fec_offset;
+  }
   if (ShouldWriteVerity()) {
-    if (!verity_writer_->Init(partition, read_fd_, write_fd_)) {
+    if (!verity_writer_->Init(partition)) {
+      LOG(INFO) << "Verity writes enabled on partition " << partition.name;
       Cleanup(ErrorCode::kVerityCalculationError);
       return;
     }
+  } else {
+    LOG(INFO) << "Verity writes disabled on partition " << partition.name;
   }
 
   // Start the first read.
-  ScheduleRead();
+  ScheduleFileSystemRead();
 }
 
 bool FilesystemVerifierAction::ShouldWriteVerity() {
@@ -215,30 +253,52 @@ bool FilesystemVerifierAction::ShouldWriteVerity() {
          (partition.hash_tree_size > 0 || partition.fec_size > 0);
 }
 
-void FilesystemVerifierAction::ScheduleRead() {
-  const InstallPlan::Partition& partition =
-      install_plan_.partitions[partition_index_];
+void FilesystemVerifierAction::ReadVerityAndFooter() {
+  if (ShouldWriteVerity()) {
+    if (!verity_writer_->Finalize(partition_fd_, partition_fd_)) {
+      LOG(ERROR) << "Failed to write hashtree/FEC data.";
+      Cleanup(ErrorCode::kFilesystemVerifierError);
+      return;
+    }
+  }
+  // Since we handed our |read_fd_| to verity_writer_ during |Finalize()|
+  // call, fd's position could have been changed. Re-seek.
+  partition_fd_->Seek(filesystem_data_end_, SEEK_SET);
+  auto bytes_to_read = partition_size_ - filesystem_data_end_;
+  while (bytes_to_read > 0) {
+    const auto read_size = std::min<size_t>(buffer_.size(), bytes_to_read);
+    auto bytes_read = partition_fd_->Read(buffer_.data(), read_size);
+    if (bytes_read <= 0) {
+      PLOG(ERROR) << "Failed to read hash tree " << bytes_read;
+      Cleanup(ErrorCode::kFilesystemVerifierError);
+      return;
+    }
+    if (!hasher_->Update(buffer_.data(), bytes_read)) {
+      LOG(ERROR) << "Unable to update the hash.";
+      Cleanup(ErrorCode::kError);
+      return;
+    }
+    bytes_to_read -= bytes_read;
+  }
+  FinishPartitionHashing();
+}
 
+void FilesystemVerifierAction::ScheduleFileSystemRead() {
   // We can only start reading anything past |hash_tree_offset| after we have
   // already read all the data blocks that the hash tree covers. The same
   // applies to FEC.
-  uint64_t read_end = partition_size_;
-  if (partition.hash_tree_size != 0 &&
-      offset_ < partition.hash_tree_data_offset + partition.hash_tree_data_size)
-    read_end = std::min(read_end, partition.hash_tree_offset);
-  if (partition.fec_size != 0 &&
-      offset_ < partition.fec_data_offset + partition.fec_data_size)
-    read_end = std::min(read_end, partition.fec_offset);
-  size_t bytes_to_read =
-      std::min(static_cast<uint64_t>(buffer_.size()), read_end - offset_);
+
+  size_t bytes_to_read = std::min(static_cast<uint64_t>(buffer_.size()),
+                                  filesystem_data_end_ - offset_);
   if (!bytes_to_read) {
-    FinishPartitionHashing();
+    ReadVerityAndFooter();
     return;
   }
-
-  auto bytes_read = read_fd_->Read(buffer_.data(), bytes_to_read);
+  partition_fd_->Seek(offset_, SEEK_SET);
+  auto bytes_read = partition_fd_->Read(buffer_.data(), bytes_to_read);
   if (bytes_read < 0) {
-    LOG(ERROR) << "Unable to schedule an asynchronous read from the stream.";
+    LOG(ERROR) << "Unable to schedule an asynchronous read from the stream. "
+               << bytes_read;
     Cleanup(ErrorCode::kError);
   } else {
     // We could just invoke |OnReadDoneCallback()|, it works. But |PostTask|
@@ -278,19 +338,19 @@ void FilesystemVerifierAction::OnReadDone(size_t bytes_read) {
       install_plan_.partitions.size());
   if (ShouldWriteVerity()) {
     if (!verity_writer_->Update(offset_, buffer_.data(), bytes_read)) {
+      LOG(ERROR) << "Unable to update verity";
       Cleanup(ErrorCode::kVerityCalculationError);
       return;
     }
   }
 
   offset_ += bytes_read;
-
-  if (offset_ == partition_size_) {
-    FinishPartitionHashing();
+  if (offset_ == filesystem_data_end_) {
+    ReadVerityAndFooter();
     return;
   }
 
-  ScheduleRead();
+  ScheduleFileSystemRead();
 }
 
 void FilesystemVerifierAction::FinishPartitionHashing() {
@@ -363,11 +423,8 @@ void FilesystemVerifierAction::FinishPartitionHashing() {
   // Start hashing the next partition, if any.
   hasher_.reset();
   buffer_.clear();
-  if (read_fd_) {
-    read_fd_.reset();
-  }
-  if (write_fd_) {
-    write_fd_.reset();
+  if (partition_fd_) {
+    partition_fd_.reset();
   }
   StartPartitionHashing();
 }
