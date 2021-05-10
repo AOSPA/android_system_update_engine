@@ -140,7 +140,7 @@ void PostinstallRunnerAction::PerformPartitionPostinstall() {
   const InstallPlan::Partition& partition =
       install_plan_.partitions[current_partition_];
 
-  const string mountable_device = partition.postinstall_mount_device;
+  const string mountable_device = partition.readonly_target_path;
   if (mountable_device.empty()) {
     LOG(ERROR) << "Cannot make mountable device from " << partition.target_path;
     return CompletePostinstall(ErrorCode::kPostinstallRunnerError);
@@ -383,6 +383,11 @@ void PostinstallRunnerAction::CompletePostinstall(ErrorCode error_code) {
     }
   }
 
+  auto dynamic_control = boot_control_->GetDynamicPartitionControl();
+  CHECK(dynamic_control);
+  dynamic_control->UnmapAllPartitions();
+  LOG(INFO) << "Unmapped all partitions.";
+
   ScopedActionCompleter completer(processor_, this);
   completer.set_code(error_code);
 
@@ -401,10 +406,6 @@ void PostinstallRunnerAction::CompletePostinstall(ErrorCode error_code) {
   if (HasOutputPipe()) {
     SetOutputObject(install_plan_);
   }
-  auto dynamic_control = boot_control_->GetDynamicPartitionControl();
-  CHECK(dynamic_control);
-  dynamic_control->UnmapAllPartitions();
-  LOG(INFO) << "Unmapped all partitions.";
 }
 
 void PostinstallRunnerAction::SuspendAction() {
