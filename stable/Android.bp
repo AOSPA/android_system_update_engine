@@ -49,7 +49,6 @@ aidl_interface {
             ],
         },
     },
-    versions: ["1"],
 }
 
 // update_engine_stable_client (type: executable)
