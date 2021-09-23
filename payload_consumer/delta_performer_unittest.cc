@@ -654,7 +654,9 @@ TEST_F(DeltaPerformerTest, SourceHashMismatchTest) {
   brillo::Blob payload_data =
       GeneratePayload(brillo::Blob(), {aop}, false, &old_part);
 
-  EXPECT_EQ(actual_data, ApplyPayload(payload_data, source.path(), false));
+  // When source hash mismatches, PartitionWriter will refuse to write anything.
+  // Therefore we should expect an empty blob.
+  EXPECT_EQ(brillo::Blob{}, ApplyPayload(payload_data, source.path(), false));
 }
 
 TEST_F(DeltaPerformerTest, ExtentsToByteStringTest) {
@@ -1114,7 +1116,7 @@ class TestDeltaPerformer : public DeltaPerformer {
  public:
   using DeltaPerformer::DeltaPerformer;
 
-  std::unique_ptr<PartitionWriter> CreatePartitionWriter(
+  std::unique_ptr<PartitionWriterInterface> CreatePartitionWriter(
       const PartitionUpdate& partition_update,
       const InstallPlan::Partition& install_part,
       DynamicPartitionControlInterface* dynamic_control,
