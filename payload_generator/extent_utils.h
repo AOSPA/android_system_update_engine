@@ -22,6 +22,7 @@
 
 #include <base/logging.h>
 
+#include "google/protobuf/repeated_field.h"
 #include "update_engine/payload_consumer/payload_constants.h"
 #include "update_engine/update_metadata.pb.h"
 
@@ -63,6 +64,8 @@ void ExtentsToVector(const google::protobuf::RepeatedPtrField<Extent>& extents,
 
 // Returns a string representing all extents in |extents|.
 std::string ExtentsToString(const std::vector<Extent>& extents);
+std::string ExtentsToString(
+    const google::protobuf::RepeatedPtrField<Extent>& extents);
 
 // Takes a pointer to extents |extents| and extents |extents_to_add|, and
 // merges them by adding |extents_to_add| to |extents| and normalizing.
@@ -123,6 +126,18 @@ struct BlockIterator {
 };
 
 std::ostream& operator<<(std::ostream& out, const Extent& extent);
+
+template <typename Container>
+size_t GetNthBlock(const Container& extents, const size_t n) {
+  size_t cur_block_count = 0;
+  for (const auto& extent : extents) {
+    if (n - cur_block_count < extent.num_blocks()) {
+      return extent.start_block() + (n - cur_block_count);
+    }
+    cur_block_count += extent.num_blocks();
+  }
+  return std::numeric_limits<size_t>::max();
+}
 
 }  // namespace chromeos_update_engine
 
