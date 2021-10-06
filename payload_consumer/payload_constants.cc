@@ -34,10 +34,10 @@ const uint32_t kBrotliBsdiffMinorPayloadVersion = 4;
 const uint32_t kPuffdiffMinorPayloadVersion = 5;
 const uint32_t kVerityMinorPayloadVersion = 6;
 const uint32_t kPartialUpdateMinorPayloadVersion = 7;
+const uint32_t kZucchiniMinorPayloadVersion = 8;
 
 const uint32_t kMinSupportedMinorPayloadVersion = kSourceMinorPayloadVersion;
-const uint32_t kMaxSupportedMinorPayloadVersion =
-    kPartialUpdateMinorPayloadVersion;
+const uint32_t kMaxSupportedMinorPayloadVersion = kZucchiniMinorPayloadVersion;
 
 const uint64_t kMaxPayloadHeaderSize = 24;
 
@@ -66,7 +66,8 @@ const char* InstallOperationTypeName(InstallOperation::Type op_type) {
       return "PUFFDIFF";
     case InstallOperation::BROTLI_BSDIFF:
       return "BROTLI_BSDIFF";
-
+    case InstallOperation::ZUCCHINI:
+      return "ZUCCHINI";
     case InstallOperation::BSDIFF:
     case InstallOperation::MOVE:
       NOTREACHED();

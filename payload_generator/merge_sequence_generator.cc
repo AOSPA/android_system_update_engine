@@ -129,6 +129,8 @@ static bool ProcessXorOps(std::vector<CowMergeOperation>* sequence,
           CHECK_EQ(op.src_extent().num_blocks(),
                    op.dst_extent().num_blocks() + 1);
         }
+        CHECK_NE(op.src_extent().start_block(),
+                 std::numeric_limits<uint64_t>::max());
       });
   return true;
 }
@@ -267,6 +269,11 @@ bool MergeSequenceGenerator::Generate(
     }
   }
 
+  // Technically, we can use std::unordered_set or just a std::vector. but
+  // std::set gives the benefit where operations are sorted by dst blocks. This
+  // will ensure that operations that do not have dependency constraints appear
+  // in increasing block order. Such order would help snapuserd batch merges and
+  // improve boot time, but isn't strictly needed for correctness.
   std::set<CowMergeOperation> free_operations;
   for (const auto& op : operations_) {
     if (incoming_edges.find(op) == incoming_edges.end()) {

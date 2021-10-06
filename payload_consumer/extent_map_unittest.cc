@@ -119,4 +119,32 @@ TEST_F(ExtentMapTest, GetNonIntersectingExtents) {
   ASSERT_EQ(ret[2].num_blocks(), 2U);
 }
 
+TEST_F(ExtentMapTest, GetSameStartBlock) {
+  ASSERT_TRUE(map_.AddExtent(ExtentForRange(0, 5), 7));
+  ASSERT_TRUE(map_.AddExtent(ExtentForRange(10, 5), 12));
+
+  const auto ret = map_.Get(ExtentForRange(0, 10));
+  // ASSERT_FALSE(ret.has_value()) << ret.value() won't work, because when |ret|
+  // doesn't have value, the part after '<<' after still evaluated, resulting in
+  // undefined behavior.
+  if (ret.has_value()) {
+    FAIL() << ret.value();
+  }
+}
+
+TEST_F(ExtentMapTest, GetTouchingExtents) {
+  ASSERT_TRUE(map_.AddExtent(ExtentForRange(5, 5), 7));
+  ASSERT_TRUE(map_.AddExtent(ExtentForRange(10, 5), 12));
+  const auto ret = map_.Get(ExtentForRange(5, 10));
+  if (ret.has_value()) {
+    ASSERT_FALSE(ret.has_value()) << ret.value();
+  }
+  const auto extents = map_.GetIntersectingExtents(ExtentForRange(0, 20));
+  ASSERT_GT(extents.size(), 0UL);
+  ASSERT_EQ(extents.size(), 2UL)
+      << "Expecting unmerged extents [5-9] and [10-14], actual: " << extents;
+  ASSERT_EQ(extents[0], ExtentForRange(5, 5));
+  ASSERT_EQ(extents[1], ExtentForRange(10, 5));
+}
+
 }  // namespace chromeos_update_engine
