@@ -16,20 +16,29 @@
 
 #include "update_engine/payload_consumer/vabc_partition_writer.h"
 
+#include <algorithm>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <brillo/secure_blob.h>
 #include <libsnapshot/cow_writer.h>
 
 #include "update_engine/common/cow_operation_convert.h"
 #include "update_engine/common/utils.h"
-#include "update_engine/payload_consumer/extent_writer.h"
+#include "update_engine/payload_consumer/block_extent_writer.h"
+#include "update_engine/payload_consumer/extent_map.h"
+#include "update_engine/payload_consumer/extent_reader.h"
 #include "update_engine/payload_consumer/file_descriptor.h"
 #include "update_engine/payload_consumer/install_plan.h"
 #include "update_engine/payload_consumer/partition_writer.h"
 #include "update_engine/payload_consumer/snapshot_extent_writer.h"
+#include "update_engine/payload_consumer/xor_extent_writer.h"
+#include "update_engine/payload_generator/extent_ranges.h"
+#include "update_engine/payload_generator/extent_utils.h"
+#include "update_engine/update_metadata.pb.h"
 
 namespace chromeos_update_engine {
 // Expected layout of COW file:
@@ -56,16 +65,29 @@ namespace chromeos_update_engine {
 // label 3, Which contains all operation 2's data, but none of operation 3's
 // data.
 
+using android::snapshot::ICowWriter;
+using ::google::protobuf::RepeatedPtrField;
+
+// Compute XOR map, a map from dst extent to corresponding merge operation
+static ExtentMap<const CowMergeOperation*, ExtentLess> ComputeXorMap(
+    const RepeatedPtrField<CowMergeOperation>& merge_ops) {
+  ExtentMap<const CowMergeOperation*, ExtentLess> xor_map;
+  for (const auto& merge_op : merge_ops) {
+    if (merge_op.type() == CowMergeOperation::COW_XOR) {
+      xor_map.AddExtent(merge_op.dst_extent(), &merge_op);
+    }
+  }
+  return xor_map;
+}
+
 VABCPartitionWriter::VABCPartitionWriter(
     const PartitionUpdate& partition_update,
     const InstallPlan::Partition& install_part,
     DynamicPartitionControlInterface* dynamic_control,
-    size_t block_size,
-    bool is_interactive)
+    size_t block_size)
     : partition_update_(partition_update),
       install_part_(install_part),
       dynamic_control_(dynamic_control),
-      interactive_(is_interactive),
       block_size_(block_size),
       executor_(block_size),
       verified_source_fd_(block_size, install_part.source_path) {}
@@ -73,8 +95,10 @@ VABCPartitionWriter::VABCPartitionWriter(
 bool VABCPartitionWriter::Init(const InstallPlan* install_plan,
                                bool source_may_exist,
                                size_t next_op_index) {
+  xor_map_ = ComputeXorMap(partition_update_.merge_operations());
   TEST_AND_RETURN_FALSE(install_plan != nullptr);
-  if (source_may_exist) {
+  if (source_may_exist && install_part_.source_size > 0) {
+    TEST_AND_RETURN_FALSE(!install_part_.source_path.empty());
     TEST_AND_RETURN_FALSE(verified_source_fd_.Open());
   }
   std::optional<std::string> source_path;
@@ -101,10 +125,20 @@ bool VABCPartitionWriter::Init(const InstallPlan* install_plan,
   }
 
   // ==============================================
+  if (!partition_update_.merge_operations().empty()) {
+    if (IsXorEnabled()) {
+      LOG(INFO) << "VABC XOR enabled for partition "
+                << partition_update_.partition_name();
+      TEST_AND_RETURN_FALSE(WriteMergeSequence(
+          partition_update_.merge_operations(), cow_writer_.get()));
+    }
+  }
 
   // TODO(zhangkelvin) Rewrite this in C++20 coroutine once that's available.
-  auto converted = ConvertToCowOperations(partition_update_.operations(),
-                                          partition_update_.merge_operations());
+  // TODO(177104308) Don't write all COPY ops up-front if merge sequence is
+  // written
+  const auto converted = ConvertToCowOperations(
+      partition_update_.operations(), partition_update_.merge_operations());
 
   if (!converted.empty()) {
     // Use source fd directly. Ideally we want to verify all extents used in
@@ -113,15 +147,51 @@ bool VABCPartitionWriter::Init(const InstallPlan* install_plan,
     auto source_fd = std::make_shared<EintrSafeFileDescriptor>();
     TEST_AND_RETURN_FALSE_ERRNO(
         source_fd->Open(install_part_.source_path.c_str(), O_RDONLY));
-    WriteAllCowOps(block_size_, converted, cow_writer_.get(), source_fd);
+    TEST_AND_RETURN_FALSE(WriteSourceCopyCowOps(
+        block_size_, converted, cow_writer_.get(), source_fd));
+    cow_writer_->AddLabel(0);
   }
   return true;
 }
 
-bool VABCPartitionWriter::WriteAllCowOps(
+bool VABCPartitionWriter::WriteMergeSequence(
+    const RepeatedPtrField<CowMergeOperation>& merge_sequence,
+    ICowWriter* cow_writer) {
+  std::vector<uint32_t> blocks_merge_order;
+  for (const auto& merge_op : merge_sequence) {
+    const auto& dst_extent = merge_op.dst_extent();
+    const auto& src_extent = merge_op.src_extent();
+    // In place copy are basically noops, they do not need to be "merged" at
+    // all, don't include them in merge sequence.
+    if (merge_op.type() == CowMergeOperation::COW_COPY &&
+        merge_op.src_extent() == merge_op.dst_extent()) {
+      continue;
+    }
+    // libsnapshot prefers blocks in reverse order, so if this isn't a self
+    // overlapping OP, writing block in reverser order
+    // If this is a self-overlapping op and |dst_extent| comes after
+    // |src_extent|, we must write in reverse order for correctness.
+    // If this is self-overlapping op and |dst_extent| comes before
+    // |src_extent|, we must write in ascending order for correctness.
+    if (ExtentRanges::ExtentsOverlap(src_extent, dst_extent) &&
+        dst_extent.start_block() <= src_extent.start_block()) {
+      for (size_t i = 0; i < dst_extent.num_blocks(); i++) {
+        blocks_merge_order.push_back(dst_extent.start_block() + i);
+      }
+    } else {
+      for (int i = dst_extent.num_blocks() - 1; i >= 0; i--) {
+        blocks_merge_order.push_back(dst_extent.start_block() + i);
+      }
+    }
+  }
+  return cow_writer->AddSequenceData(blocks_merge_order.size(),
+                                     blocks_merge_order.data());
+}
+
+bool VABCPartitionWriter::WriteSourceCopyCowOps(
     size_t block_size,
     const std::vector<CowOperation>& converted,
-    android::snapshot::ICowWriter* cow_writer,
+    ICowWriter* cow_writer,
     FileDescriptorPtr source_fd) {
   std::vector<uint8_t> buffer(block_size);
 
@@ -183,7 +253,7 @@ bool VABCPartitionWriter::PerformReplaceOperation(const InstallOperation& op,
   return executor_.ExecuteReplaceOperation(op, std::move(writer), data, count);
 }
 
-bool VABCPartitionWriter::PerformSourceBsdiffOperation(
+bool VABCPartitionWriter::PerformDiffOperation(
     const InstallOperation& operation,
     ErrorCode* error,
     const void* data,
@@ -191,23 +261,13 @@ bool VABCPartitionWriter::PerformSourceBsdiffOperation(
   FileDescriptorPtr source_fd =
       verified_source_fd_.ChooseSourceFD(operation, error);
   TEST_AND_RETURN_FALSE(source_fd != nullptr);
+  TEST_AND_RETURN_FALSE(source_fd->IsOpen());
 
-  auto writer = CreateBaseExtentWriter();
-  return executor_.ExecuteSourceBsdiffOperation(
-      operation, std::move(writer), source_fd, data, count);
-}
-
-bool VABCPartitionWriter::PerformPuffDiffOperation(
-    const InstallOperation& operation,
-    ErrorCode* error,
-    const void* data,
-    size_t count) {
-  FileDescriptorPtr source_fd =
-      verified_source_fd_.ChooseSourceFD(operation, error);
-  TEST_AND_RETURN_FALSE(source_fd != nullptr);
-
-  auto writer = CreateBaseExtentWriter();
-  return executor_.ExecutePuffDiffOperation(
+  std::unique_ptr<ExtentWriter> writer =
+      IsXorEnabled() ? std::make_unique<XORExtentWriter>(
+                           operation, source_fd, cow_writer_.get(), xor_map_)
+                     : CreateBaseExtentWriter();
+  return executor_.ExecuteDiffOperation(
       operation, std::move(writer), source_fd, data, count);
 }
 
@@ -224,7 +284,9 @@ void VABCPartitionWriter::CheckpointUpdateProgress(size_t next_op_index) {
   // Add a hardcoded magic label to indicate end of all install ops. This label
   // is needed by filesystem verification, don't remove.
   TEST_AND_RETURN_FALSE(cow_writer_ != nullptr);
-  return cow_writer_->AddLabel(kEndOfInstallLabel);
+  TEST_AND_RETURN_FALSE(cow_writer_->AddLabel(kEndOfInstallLabel));
+  TEST_AND_RETURN_FALSE(cow_writer_->Finalize());
+  return cow_writer_->VerifyMergeOps();
 }
 
 VABCPartitionWriter::~VABCPartitionWriter() {

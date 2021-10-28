@@ -32,10 +32,12 @@
 
 #include <base/files/file_path.h>
 #include <base/posix/eintr_wrapper.h>
+#include <base/strings/string_number_conversions.h>
 #include <base/time/time.h>
 #include <brillo/key_value_store.h>
 #include <brillo/secure_blob.h>
 
+#include "android-base/mapped_file.h"
 #include "update_engine/common/action.h"
 #include "update_engine/common/action_processor.h"
 #include "update_engine/common/constants.h"
@@ -357,6 +359,8 @@ std::string GetExclusionName(const std::string& str_to_convert);
 ErrorCode IsTimestampNewer(const std::string& old_version,
                            const std::string& new_version);
 
+std::unique_ptr<android::base::MappedFile> GetReadonlyZeroBlock(size_t size);
+
 }  // namespace utils
 
 // Utility class to close a file descriptor
@@ -476,6 +480,8 @@ struct Range {
   T t2_;
 };
 
+std::string HexEncode(const brillo::Blob& blob) noexcept;
+
 }  // namespace chromeos_update_engine
 
 #define TEST_AND_RETURN_FALSE_ERRNO(_x)                              \
@@ -527,5 +533,23 @@ struct Range {
       return false;                            \
     }                                          \
   } while (0)
+
+#define TEST_OP(_x, _y, op)                                                \
+  do {                                                                     \
+    const auto& x = _x;                                                    \
+    const auto& y = _y;                                                    \
+    if (!(x op y)) {                                                       \
+      LOG(ERROR) << #_x " " #op " " #_y << " failed: " << x << " " #op " " \
+                 << y;                                                     \
+      return {};                                                           \
+    }                                                                      \
+  } while (0)
+
+#define TEST_EQ(_x, _y) TEST_OP(_x, _y, ==)
+#define TEST_NE(_x, _y) TEST_OP(_x, _y, !=)
+#define TEST_LE(_x, _y) TEST_OP(_x, _y, <=)
+#define TEST_GE(_x, _y) TEST_OP(_x, _y, >=)
+#define TEST_LT(_x, _y) TEST_OP(_x, _y, <)
+#define TEST_GT(_x, _y) TEST_OP(_x, _y, >)
 
 #endif  // UPDATE_ENGINE_COMMON_UTILS_H_
