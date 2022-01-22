@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include <android-base/properties.h>
 #include <brillo/secure_blob.h>
 #include <libsnapshot/cow_writer.h>
 
@@ -167,20 +168,41 @@ bool VABCPartitionWriter::WriteMergeSequence(
         merge_op.src_extent() == merge_op.dst_extent()) {
       continue;
     }
-    // libsnapshot prefers blocks in reverse order, so if this isn't a self
-    // overlapping OP, writing block in reverser order
+
+    const bool extent_overlap =
+        ExtentRanges::ExtentsOverlap(src_extent, dst_extent);
+    // TODO(193863443) Remove this check once this feature
+    // lands on all pixel devices.
+    const bool is_ascending = android::base::GetBoolProperty(
+        "ro.virtual_ab.userspace.snapshots.enabled", false);
+
     // If this is a self-overlapping op and |dst_extent| comes after
     // |src_extent|, we must write in reverse order for correctness.
+    //
     // If this is self-overlapping op and |dst_extent| comes before
     // |src_extent|, we must write in ascending order for correctness.
-    if (ExtentRanges::ExtentsOverlap(src_extent, dst_extent) &&
-        dst_extent.start_block() <= src_extent.start_block()) {
-      for (size_t i = 0; i < dst_extent.num_blocks(); i++) {
-        blocks_merge_order.push_back(dst_extent.start_block() + i);
+    //
+    // If this isn't a self overlapping op, write block in ascending order
+    // if userspace snapshots are enabled
+    if (extent_overlap) {
+      if (dst_extent.start_block() <= src_extent.start_block()) {
+        for (size_t i = 0; i < dst_extent.num_blocks(); i++) {
+          blocks_merge_order.push_back(dst_extent.start_block() + i);
+        }
+      } else {
+        for (int i = dst_extent.num_blocks() - 1; i >= 0; i--) {
+          blocks_merge_order.push_back(dst_extent.start_block() + i);
+        }
       }
     } else {
-      for (int i = dst_extent.num_blocks() - 1; i >= 0; i--) {
-        blocks_merge_order.push_back(dst_extent.start_block() + i);
+      if (is_ascending) {
+        for (size_t i = 0; i < dst_extent.num_blocks(); i++) {
+          blocks_merge_order.push_back(dst_extent.start_block() + i);
+        }
+      } else {
+        for (int i = dst_extent.num_blocks() - 1; i >= 0; i--) {
+          blocks_merge_order.push_back(dst_extent.start_block() + i);
+        }
       }
     }
   }
@@ -193,30 +215,36 @@ bool VABCPartitionWriter::WriteSourceCopyCowOps(
     const std::vector<CowOperation>& converted,
     ICowWriter* cow_writer,
     FileDescriptorPtr source_fd) {
-  std::vector<uint8_t> buffer(block_size);
-
   for (const auto& cow_op : converted) {
+    std::vector<uint8_t> buffer;
     switch (cow_op.op) {
       case CowOperation::CowCopy:
         if (cow_op.src_block == cow_op.dst_block) {
           continue;
         }
-        TEST_AND_RETURN_FALSE(
-            cow_writer->AddCopy(cow_op.dst_block, cow_op.src_block));
+        // Add blocks in reverse order, because snapused specifically prefers
+        // this ordering. Since we already eliminated all self-overlapping
+        // SOURCE_COPY during delta generation, this should be safe to do.
+        for (size_t i = cow_op.block_count; i > 0; i--) {
+          TEST_AND_RETURN_FALSE(cow_writer->AddCopy(cow_op.dst_block + i - 1,
+                                                    cow_op.src_block + i - 1));
+        }
         break;
       case CowOperation::CowReplace:
+        buffer.resize(block_size * cow_op.block_count);
         ssize_t bytes_read = 0;
         TEST_AND_RETURN_FALSE(utils::ReadAll(source_fd,
                                              buffer.data(),
-                                             block_size,
+                                             block_size * cow_op.block_count,
                                              cow_op.src_block * block_size,
                                              &bytes_read));
-        if (bytes_read <= 0 || static_cast<size_t>(bytes_read) != block_size) {
+        if (bytes_read <= 0 ||
+            static_cast<size_t>(bytes_read) != buffer.size()) {
           LOG(ERROR) << "source_fd->Read failed: " << bytes_read;
           return false;
         }
         TEST_AND_RETURN_FALSE(cow_writer->AddRawBlocks(
-            cow_op.dst_block, buffer.data(), block_size));
+            cow_op.dst_block, buffer.data(), buffer.size()));
         break;
     }
   }
@@ -286,7 +314,8 @@ void VABCPartitionWriter::CheckpointUpdateProgress(size_t next_op_index) {
   TEST_AND_RETURN_FALSE(cow_writer_ != nullptr);
   TEST_AND_RETURN_FALSE(cow_writer_->AddLabel(kEndOfInstallLabel));
   TEST_AND_RETURN_FALSE(cow_writer_->Finalize());
-  return cow_writer_->VerifyMergeOps();
+  TEST_AND_RETURN_FALSE(cow_writer_->VerifyMergeOps());
+  return true;
 }
 
 VABCPartitionWriter::~VABCPartitionWriter() {
