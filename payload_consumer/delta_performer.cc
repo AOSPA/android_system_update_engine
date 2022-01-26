@@ -247,8 +247,8 @@ bool DeltaPerformer::OpenCurrentPartition() {
       IsDynamicPartition(install_part.name, install_plan_->target_slot));
   // Open source fds if we have a delta payload, or for partitions in the
   // partial update.
-  bool source_may_exist = manifest_.partial_update() ||
-                          payload_->type == InstallPayloadType::kDelta;
+  const bool source_may_exist = manifest_.partial_update() ||
+                                payload_->type == InstallPayloadType::kDelta;
   const size_t partition_operation_num = GetPartitionOperationNum();
 
   TEST_AND_RETURN_FALSE(partition_writer_->Init(
@@ -265,7 +265,7 @@ size_t DeltaPerformer::GetPartitionOperationNum() {
 namespace {
 
 void LogPartitionInfoHash(const PartitionInfo& info, const string& tag) {
-  string sha256 = brillo::data_encoding::Base64Encode(info.hash());
+  string sha256 = HexEncode(info.hash());
   LOG(INFO) << "PartitionInfo " << tag << " sha256: " << sha256
             << " size: " << info.size();
 }
@@ -892,6 +892,7 @@ DeltaPerformer::CreatePayloadVerifier() {
   if (public_key.empty()) {
     return {nullptr, false};
   }
+  LOG(INFO) << "Verifing using public key: " << public_key;
   return {PayloadVerifier::CreateInstance(public_key), true};
 }
 
@@ -1146,9 +1147,12 @@ ErrorCode DeltaPerformer::VerifyPayload(
   // Verifies the payload hash.
   TEST_AND_RETURN_VAL(ErrorCode::kDownloadPayloadVerificationError,
                       !payload_hash_calculator_.raw_hash().empty());
-  TEST_AND_RETURN_VAL(
-      ErrorCode::kPayloadHashMismatchError,
-      payload_hash_calculator_.raw_hash() == update_check_response_hash);
+  if (payload_hash_calculator_.raw_hash() != update_check_response_hash) {
+    LOG(ERROR) << "Actual hash: "
+               << HexEncode(payload_hash_calculator_.raw_hash())
+               << ", expected hash: " << HexEncode(update_check_response_hash);
+    return ErrorCode::kPayloadHashMismatchError;
+  }
 
   // NOLINTNEXTLINE(whitespace/braces)
   auto [payload_verifier, perform_verification] = CreatePayloadVerifier();

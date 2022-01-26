@@ -47,6 +47,7 @@
 #include "update_engine/common/hash_calculator.h"
 #include "update_engine/common/mock_download_action.h"
 #include "update_engine/common/test_utils.h"
+#include "update_engine/common/testing_constants.h"
 #include "update_engine/common/utils.h"
 #include "update_engine/payload_consumer/fake_file_descriptor.h"
 #include "update_engine/payload_consumer/mock_partition_writer.h"
@@ -67,9 +68,6 @@ using test_utils::kRandomString;
 using testing::_;
 using testing::Return;
 using ::testing::Sequence;
-
-extern const char* kUnittestPrivateKeyPath;
-extern const char* kUnittestPublicKeyPath;
 
 namespace {
 
@@ -169,7 +167,6 @@ class DeltaPerformerTest : public ::testing::Test {
     install_plan_.target_slot = 1;
     EXPECT_CALL(mock_delegate_, ShouldCancel(_))
         .WillRepeatedly(testing::Return(false));
-    performer_.set_update_certificates_path("");
     // Set the public key corresponding to the unittest private key.
     string public_key_path = GetBuildArtifactsPath(kUnittestPublicKeyPath);
     EXPECT_TRUE(utils::FileExists(public_key_path.c_str()));
@@ -445,7 +442,8 @@ class DeltaPerformerTest : public ::testing::Test {
                             &mock_delegate_,
                             &install_plan_,
                             &payload_,
-                            false /* interactive*/};
+                            false /* interactive */,
+                            "" /* Update certs path */};
 };
 
 TEST_F(DeltaPerformerTest, FullPayloadWriteTest) {

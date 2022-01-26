@@ -45,6 +45,7 @@
 #include <base/threading/simple_thread.h>
 #include <brillo/data_encoding.h>
 #include <bsdiff/bsdiff.h>
+#include <bsdiff/constants.h>
 #include <bsdiff/control_entry.h>
 #include <bsdiff/patch_reader.h>
 #include <bsdiff/patch_writer_factory.h>
@@ -201,6 +202,11 @@ bool BestDiffGenerator::GenerateBestDiffOperation(AnnotatedOperation* aop,
   return GenerateBestDiffOperation(diff_candidates, aop, data_blob);
 }
 
+std::vector<bsdiff::CompressorType>
+BestDiffGenerator::GetUsableCompressorTypes() const {
+  return config_.compressors;
+}
+
 bool BestDiffGenerator::GenerateBestDiffOperation(
     const std::vector<std::pair<InstallOperation_Type, size_t>>&
         diff_candidates,
@@ -260,10 +266,8 @@ bool BestDiffGenerator::TryBsdiffAndUpdateOperation(
 
   std::unique_ptr<bsdiff::PatchWriterInterface> bsdiff_patch_writer;
   if (operation_type == InstallOperation::BROTLI_BSDIFF) {
-    bsdiff_patch_writer =
-        bsdiff::CreateBSDF2PatchWriter(patch.value(),
-                                       bsdiff::CompressorType::kBrotli,
-                                       kBrotliCompressionQuality);
+    bsdiff_patch_writer = bsdiff::CreateBSDF2PatchWriter(
+        patch.value(), GetUsableCompressorTypes(), kBrotliCompressionQuality);
   } else {
     bsdiff_patch_writer = bsdiff::CreateBsdiffPatchWriter(patch.value());
   }
@@ -328,6 +332,7 @@ bool BestDiffGenerator::TryPuffdiffAndUpdateOperation(AnnotatedOperation* aop,
                                            new_data_,
                                            src_deflates,
                                            dst_deflates,
+                                           GetUsableCompressorTypes(),
                                            temp_file.path(),
                                            &puffdiff_delta));
     TEST_AND_RETURN_FALSE(!puffdiff_delta.empty());
@@ -346,6 +351,20 @@ bool BestDiffGenerator::TryPuffdiffAndUpdateOperation(AnnotatedOperation* aop,
 
 bool BestDiffGenerator::TryZucchiniAndUpdateOperation(AnnotatedOperation* aop,
                                                       brillo::Blob* data_blob) {
+  // zip files are ignored for now. We expect puffin to perform better on those.
+  // Investigate whether puffin over zucchini yields better results on those.
+  if (!deflate_utils::IsFileExtensions(
+          aop->name,
+          {".ko",
+           ".so",
+           ".art",
+           ".odex",
+           ".vdex",
+           "<kernel>",
+           "<modem-partition>",
+           /*, ".capex",".jar", ".apk", ".apex"*/})) {
+    return true;
+  }
   zucchini::ConstBufferView src_bytes(old_data_.data(), old_data_.size());
   zucchini::ConstBufferView dst_bytes(new_data_.data(), new_data_.size());
 
@@ -592,28 +611,29 @@ bool DeltaReadPartition(vector<AnnotatedOperation>* aops,
     if (new_file_extents.empty())
       continue;
 
-    // We can't visit each dst image inode more than once, as that would
-    // duplicate work. Here, we avoid visiting each source image inode
-    // more than once. Technically, we could have multiple operations
-    // that read the same blocks from the source image for diffing, but
-    // we choose not to avoid complexity. Eventually we will move away
-    // from using a graph/cycle detection/etc to generate diffs, and at that
-    // time, it will be easy (non-complex) to have many operations read
-    // from the same source blocks. At that time, this code can die. -adlr
     FilesystemInterface::File old_file =
         GetOldFile(old_files_map, new_file.name);
-    auto old_file_extents =
-        FilterExtentRanges(old_file.extents, old_zero_blocks);
-    old_visited_blocks.AddExtents(old_file_extents);
+    old_visited_blocks.AddExtents(old_file.extents);
 
-    // TODO(b/177104308) Filtering |new_file_extents| might cause inconsistency
-    // with new_file.deflates. But we filter blocks across different InstallOps
-    // already. Investigate if computing deflates after these filtering produces
-    // better results.
+    // TODO(b/177104308) Filtering |new_file_extents| might confuse puffdiff, as
+    // we might filterout extents with deflate streams. PUFFDIFF is written with
+    // that in mind, so it will try to adapt to the filtered extents.
+    // Correctness is intact, but might yield larger patch sizes. From what we
+    // experimented, this has little impact on OTA size. Meanwhile, XOR ops
+    // depend on this. So filter out duplicate blocks from new file.
+    // TODO(b/194237829) |old_file.extents| is used instead of the de-duped
+    // |old_file_extents|. This is because zucchini diffing algorithm works
+    // better when given the full source file.
+    // Current logic:
+    // 1. src extent is completely unfiltered. It may contain
+    // duplicate blocks across files, within files, it may contain zero blocks,
+    // etc.
+    // 2. dst extent is completely filtered, no duplicate blocks or zero blocks
+    // whatsoever.
     file_delta_processors.emplace_back(old_part.path,
                                        new_part.path,
                                        config,
-                                       std::move(old_file_extents),
+                                       std::move(old_file.extents),
                                        RemoveDuplicateBlocks(new_file_extents),
                                        old_file.deflates,
                                        new_file.deflates,
@@ -1127,7 +1147,7 @@ bool InitializePartitionInfo(const PartitionConfig& part, PartitionInfo* info) {
   const brillo::Blob& hash = hasher.raw_hash();
   info->set_hash(hash.data(), hash.size());
   LOG(INFO) << part.path << ": size=" << part.size
-            << " hash=" << brillo::data_encoding::Base64Encode(hash);
+            << " hash=" << HexEncode(hash);
   return true;
 }
 

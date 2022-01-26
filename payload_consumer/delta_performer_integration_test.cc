@@ -41,6 +41,7 @@
 #include "update_engine/common/mock_download_action.h"
 #include "update_engine/common/mock_prefs.h"
 #include "update_engine/common/test_utils.h"
+#include "update_engine/common/testing_constants.h"
 #include "update_engine/common/utils.h"
 #include "update_engine/payload_consumer/install_plan.h"
 #include "update_engine/payload_consumer/payload_constants.h"
@@ -65,13 +66,6 @@ using testing::IsEmpty;
 using testing::NiceMock;
 using testing::Not;
 using testing::Return;
-
-extern const char* kUnittestPrivateKeyPath;
-extern const char* kUnittestPublicKeyPath;
-extern const char* kUnittestPrivateKey2Path;
-extern const char* kUnittestPublicKey2Path;
-extern const char* kUnittestPrivateKeyECPath;
-extern const char* kUnittestPublicKeyECPath;
 
 static const uint32_t kDefaultKernelSize = 4096;  // Something small for a test
 // clang-format off
@@ -805,13 +799,13 @@ static void ApplyDeltaFile(bool full_kernel,
                                   &state->mock_delegate_,
                                   install_plan,
                                   &install_plan->payloads[0],
-                                  false /* interactive */);
+                                  false /* interactive */,
+                                  "");
   string public_key_path = signature_test == kSignatureGeneratedShellECKey
                                ? GetBuildArtifactsPath(kUnittestPublicKeyECPath)
                                : GetBuildArtifactsPath(kUnittestPublicKeyPath);
   ASSERT_TRUE(utils::FileExists(public_key_path.c_str()));
   (*performer)->set_public_key_path(public_key_path);
-  (*performer)->set_update_certificates_path("");
 
   ASSERT_EQ(
       static_cast<off_t>(state->image_size),
