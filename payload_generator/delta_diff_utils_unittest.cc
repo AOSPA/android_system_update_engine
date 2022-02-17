@@ -27,6 +27,7 @@
 #include <bsdiff/patch_writer.h>
 #include <gtest/gtest.h>
 
+#include "payload_generator/filesystem_interface.h"
 #include "update_engine/common/test_utils.h"
 #include "update_engine/common/utils.h"
 #include "update_engine/payload_generator/delta_diff_generator.h"
@@ -215,8 +216,8 @@ TEST_F(DeltaDiffUtilsTest, ReplaceSmallTest) {
         new_part_.path,
         old_extents,
         new_extents,
-        {},  // old_deflates
-        {},  // new_deflates
+        {},  // old_file
+        {},  // new_file
         {.version = PayloadVersion(kBrilloMajorPayloadVersion,
                                    kSourceMinorPayloadVersion)},
         &data,
@@ -324,17 +325,20 @@ TEST_F(DeltaDiffUtilsTest, BrotliBsdiffTest) {
 
   brillo::Blob data;
   AnnotatedOperation aop;
-  ASSERT_TRUE(diff_utils::ReadExtentsToDiff(
-      old_part_.path,
-      new_part_.path,
-      old_extents,
-      new_extents,
-      {},  // old_deflates
-      {},  // new_deflates
-      {.version = PayloadVersion(kBrilloMajorPayloadVersion,
-                                 kBrotliBsdiffMinorPayloadVersion)},
-      &data,
-      &aop));
+
+  std::vector<puffin::BitExtent> empty;
+  PayloadGenerationConfig config{
+      .version = PayloadVersion(kBrilloMajorPayloadVersion,
+                                kBrotliBsdiffMinorPayloadVersion)};
+  ASSERT_TRUE(diff_utils::ReadExtentsToDiff(old_part_.path,
+                                            new_part_.path,
+                                            old_extents,
+                                            new_extents,
+                                            {},  // old_file
+                                            {},  // new_file
+                                            config,
+                                            &data,
+                                            &aop));
   auto& op = aop.op;
   ASSERT_FALSE(data.empty());
   ASSERT_TRUE(op.has_type());
@@ -365,15 +369,17 @@ TEST_F(DeltaDiffUtilsTest, GenerateBestDiffOperation_Zucchini) {
   // Zucchini is only enabled on files with certain extensions
   aop.name = "data.so";
 
-  diff_utils::BestDiffGenerator best_diff_generator(
-      src_data_blob,
-      dst_data_blob,
-      old_extents,
-      new_extents,
-      {},
-      {},
-      {.version = PayloadVersion(kBrilloMajorPayloadVersion,
-                                 kZucchiniMinorPayloadVersion)});
+  const FilesystemInterface::File empty;
+  PayloadGenerationConfig config{
+      .version = PayloadVersion(kBrilloMajorPayloadVersion,
+                                kZucchiniMinorPayloadVersion)};
+  diff_utils::BestDiffGenerator best_diff_generator(src_data_blob,
+                                                    dst_data_blob,
+                                                    old_extents,
+                                                    new_extents,
+                                                    empty,
+                                                    empty,
+                                                    config);
   ASSERT_TRUE(best_diff_generator.GenerateBestDiffOperation(
       {{InstallOperation::ZUCCHINI, 1024 * 1024}}, &aop, &data));
 
@@ -407,15 +413,17 @@ TEST_F(DeltaDiffUtilsTest, GenerateBestDiffOperation_FullOperationBetter) {
   AnnotatedOperation aop;
   aop.op.set_type(InstallOperation::REPLACE_XZ);
 
-  diff_utils::BestDiffGenerator best_diff_generator(
-      src_data_blob,
-      dst_data_blob,
-      old_extents,
-      new_extents,
-      {},
-      {},
-      {.version = PayloadVersion(kBrilloMajorPayloadVersion,
-                                 kZucchiniMinorPayloadVersion)});
+  const FilesystemInterface::File empty;
+  PayloadGenerationConfig config{
+      .version = PayloadVersion(kBrilloMajorPayloadVersion,
+                                kZucchiniMinorPayloadVersion)};
+  diff_utils::BestDiffGenerator best_diff_generator(src_data_blob,
+                                                    dst_data_blob,
+                                                    old_extents,
+                                                    new_extents,
+                                                    empty,
+                                                    empty,
+                                                    config);
   ASSERT_TRUE(best_diff_generator.GenerateBestDiffOperation(
       {{InstallOperation::ZUCCHINI, 1024 * 1024}}, &aop, &data));
 
@@ -439,17 +447,20 @@ TEST_F(DeltaDiffUtilsTest, PreferReplaceTest) {
 
   brillo::Blob data;
   AnnotatedOperation aop;
-  ASSERT_TRUE(diff_utils::ReadExtentsToDiff(
-      old_part_.path,
-      new_part_.path,
-      extents,
-      extents,
-      {},  // old_deflates
-      {},  // new_deflates
-      {.version = PayloadVersion(kMaxSupportedMajorPayloadVersion,
-                                 kMaxSupportedMinorPayloadVersion)},
-      &data,
-      &aop));
+
+  const FilesystemInterface::File empty;
+  PayloadGenerationConfig config{
+      .version = PayloadVersion(kMaxSupportedMajorPayloadVersion,
+                                kMaxSupportedMinorPayloadVersion)};
+  ASSERT_TRUE(diff_utils::ReadExtentsToDiff(old_part_.path,
+                                            new_part_.path,
+                                            extents,
+                                            extents,
+                                            empty,  // old_file
+                                            empty,  // new_file
+                                            config,
+                                            &data,
+                                            &aop));
   auto& op = aop.op;
   ASSERT_FALSE(data.empty());
   ASSERT_TRUE(op.has_type());
