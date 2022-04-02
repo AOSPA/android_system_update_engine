@@ -18,11 +18,13 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <iterator>
 #include <memory>
 
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+#include <android-base/strings.h>
 #include <base/files/file_path.h>
 #include <gflags/gflags.h>
 #include <unistd.h>
@@ -41,6 +43,10 @@ DEFINE_int64(payload_offset,
              0,
              "Offset to start of payload.bin. Useful if payload path actually "
              "points to a .zip file containing payload.bin");
+DEFINE_string(partitions,
+              "",
+              "Comma separated list of partitions to extract, leave empty for "
+              "extracting all partitions");
 
 using chromeos_update_engine::DeltaArchiveManifest;
 using chromeos_update_engine::PayloadMetadata;
@@ -51,7 +57,8 @@ bool ExtractImagesFromOTA(const DeltaArchiveManifest& manifest,
                           const PayloadMetadata& metadata,
                           int payload_fd,
                           size_t payload_offset,
-                          std::string_view output_dir) {
+                          std::string_view output_dir,
+                          const std::set<std::string>& partitions) {
   InstallOperationExecutor executor(manifest.block_size());
   const size_t data_begin = metadata.GetMetadataSize() +
                             metadata.GetMetadataSignatureSize() +
@@ -60,6 +67,10 @@ bool ExtractImagesFromOTA(const DeltaArchiveManifest& manifest,
       base::StringPiece(output_dir.data(), output_dir.size()));
   std::vector<unsigned char> blob;
   for (const auto& partition : manifest.partitions()) {
+    if (!partitions.empty() &&
+        partitions.count(partition.partition_name()) == 0) {
+      continue;
+    }
     LOG(INFO) << "Extracting partition " << partition.partition_name()
               << " size: " << partition.new_partition_info().size();
     const auto output_path =
@@ -75,8 +86,19 @@ bool ExtractImagesFromOTA(const DeltaArchiveManifest& manifest,
       TEST_AND_RETURN_FALSE(utils::PReadAll(
           payload_fd, blob.data(), blob.size(), op_data_offset, &bytes_read));
       auto direct_writer = std::make_unique<DirectExtentWriter>(fd);
-      TEST_AND_RETURN_FALSE(executor.ExecuteReplaceOperation(
-          op, std::move(direct_writer), blob.data(), blob.size()));
+      if (op.type() == InstallOperation::ZERO) {
+        TEST_AND_RETURN_FALSE(executor.ExecuteZeroOrDiscardOperation(
+            op, std::move(direct_writer)));
+      } else if (op.type() == InstallOperation::REPLACE ||
+                 op.type() == InstallOperation::REPLACE_BZ ||
+                 op.type() == InstallOperation::REPLACE_XZ) {
+        TEST_AND_RETURN_FALSE(executor.ExecuteReplaceOperation(
+            op, std::move(direct_writer), blob.data(), blob.size()));
+      } else {
+        LOG(ERROR) << "Unsupported operation type: " << op.type() << ", "
+                   << InstallOperation::Type_Name(op.type());
+        return false;
+      }
     }
     int err =
         truncate64(output_path.c_str(), partition.new_partition_info().size());
@@ -98,9 +120,20 @@ bool ExtractImagesFromOTA(const DeltaArchiveManifest& manifest,
 int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   xz_crc32_init();
+  auto tokens = android::base::Tokenize(FLAGS_partitions, ",");
+  const std::set<std::string> partitions(
+      std::make_move_iterator(tokens.begin()),
+      std::make_move_iterator(tokens.end()));
+  if (FLAGS_payload.empty()) {
+    LOG(ERROR) << "--payload <payload path> is required";
+    return 1;
+  }
+  if (!partitions.empty()) {
+    LOG(INFO) << "Extracting " << android::base::Join(partitions, ", ");
+  }
   int payload_fd = open(FLAGS_payload.c_str(), O_RDONLY | O_CLOEXEC);
   if (payload_fd < 0) {
-    PLOG(ERROR) << "Failed to open payload file:";
+    PLOG(ERROR) << "Failed to open payload file";
     return 1;
   }
   chromeos_update_engine::ScopedFdCloser closer{&payload_fd};
@@ -143,5 +176,6 @@ int main(int argc, char* argv[]) {
                                payload_metadata,
                                payload_fd,
                                FLAGS_payload_offset,
-                               FLAGS_output_dir);
+                               FLAGS_output_dir,
+                               partitions);
 }
