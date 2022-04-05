@@ -411,8 +411,8 @@ std::string GetExclusionName(const std::string& str_to_convert);
 // integer.
 // Return kPayloadTimestampError if both are integers but |new_version| <
 // |old_version|.
-ErrorCode IsTimestampNewer(const std::string& old_version,
-                           const std::string& new_version);
+ErrorCode IsTimestampNewer(const std::string_view old_version,
+                           const std::string_view new_version);
 
 std::unique_ptr<android::base::MappedFile> GetReadonlyZeroBlock(size_t size);
 
@@ -544,6 +544,17 @@ template <size_t kSize>
 std::string HexEncode(const std::array<uint8_t, kSize> blob) noexcept {
   return base::HexEncode(blob.data(), blob.size());
 }
+
+[[nodiscard]] std::string_view ToStringView(
+    const std::vector<unsigned char>& blob) noexcept;
+
+constexpr std::string_view ToStringView(
+    const std::vector<char>& blob) noexcept {
+  return std::string_view{blob.data(), blob.size()};
+}
+
+[[nodiscard]] std::string_view ToStringView(const void* data,
+                                            size_t size) noexcept;
 
 }  // namespace chromeos_update_engine
 
