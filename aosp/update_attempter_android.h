@@ -31,7 +31,7 @@
 #include "update_engine/client_library/include/update_engine/update_status.h"
 #include "update_engine/common/action_processor.h"
 #include "update_engine/common/boot_control_interface.h"
-#include "update_engine/common/clock.h"
+#include "update_engine/common/clock_interface.h"
 #include "update_engine/common/daemon_state_interface.h"
 #include "update_engine/common/download_action.h"
 #include "update_engine/common/error_code.h"
@@ -39,8 +39,6 @@
 #include "update_engine/common/metrics_reporter_interface.h"
 #include "update_engine/common/network_selector_interface.h"
 #include "update_engine/common/prefs_interface.h"
-#include "update_engine/common/service_observer_interface.h"
-#include "update_engine/metrics_utils.h"
 #include "update_engine/payload_consumer/filesystem_verifier_action.h"
 #include "update_engine/payload_consumer/postinstall_runner_action.h"
 
@@ -250,9 +248,6 @@ class UpdateAttempterAndroid
   // TimeTicks to ensure that notifications are sent even if the system clock is
   // set back in the middle of an update.
   base::TimeTicks last_notify_time_;
-
-  // Only direct proxy supported.
-  DirectProxyResolver proxy_resolver_;
 
   // The processor for running Actions.
   std::unique_ptr<ActionProcessor> processor_;
