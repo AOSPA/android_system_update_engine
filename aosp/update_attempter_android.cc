@@ -350,6 +350,9 @@ bool UpdateAttempterAndroid::ApplyPayload(
               << headers[kPayloadPropertyNetworkProxy];
     fetcher->SetProxies({headers[kPayloadPropertyNetworkProxy]});
   }
+  if (!headers[kPayloadDisableVABC].empty()) {
+    install_plan_.disable_vabc = true;
+  }
 
   BuildUpdateActions(fetcher);
 
@@ -434,7 +437,7 @@ bool UpdateAttempterAndroid::ResetStatus(brillo::ErrorPtr* error) {
 
   if (!boot_control_->GetDynamicPartitionControl()->ResetUpdate(prefs_)) {
     LOG(WARNING) << "Failed to reset snapshots. UpdateStatus is IDLE but"
-                  << "space might not be freed.";
+                 << "space might not be freed.";
   }
   switch (status_) {
     case UpdateStatus::IDLE: {
