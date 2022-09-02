@@ -552,7 +552,7 @@ bool DeltaPerformer::Write(const void* bytes, size_t count, ErrorCode* error) {
 
     base::TimeTicks op_start_time = base::TimeTicks::Now();
 
-    bool op_result;
+    bool op_result{};
     const string op_name = InstallOperationTypeName(op.type());
     switch (op.type()) {
       case InstallOperation::REPLACE:
@@ -1231,7 +1231,7 @@ bool DeltaPerformer::CanResumeUpdate(PrefsInterface* prefs,
     return false;
   }
 
-  int64_t resumed_update_failures;
+  int64_t resumed_update_failures{};
   // Note that storing this value is optional, but if it is there it should
   // not be more than the limit.
   if (prefs->GetInt64(kPrefsResumedUpdateFailures, &resumed_update_failures) &&
@@ -1423,7 +1423,7 @@ bool DeltaPerformer::PrimeUpdateState() {
   total_bytes_received_ += buffer_offset_;
 
   // Speculatively count the resume as a failure.
-  int64_t resumed_update_failures;
+  int64_t resumed_update_failures{};
   if (prefs_->GetInt64(kPrefsResumedUpdateFailures, &resumed_update_failures)) {
     resumed_update_failures++;
   } else {

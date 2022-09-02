@@ -21,6 +21,7 @@
 #include <memory>
 #include <ostream>
 #include <utility>
+#include <vector>
 
 #include <android-base/properties.h>
 #include <android-base/unique_fd.h>
@@ -34,6 +35,7 @@
 #include <processgroup/processgroup.h>
 
 #include "update_engine/aosp/cleanup_previous_update_action.h"
+#include "update_engine/common/clock.h"
 #include "update_engine/common/constants.h"
 #include "update_engine/common/daemon_state_interface.h"
 #include "update_engine/common/download_action.h"
@@ -465,7 +467,7 @@ bool UpdateAttempterAndroid::VerifyPayloadParseManifest(
         FROM_HERE,
         "Failed to read payload header from " + metadata_filename);
   }
-  ErrorCode errorcode;
+  ErrorCode errorcode{};
   PayloadMetadata payload_metadata;
   if (payload_metadata.ParsePayloadHeader(metadata, &errorcode) !=
       MetadataParseResult::kSuccess) {
@@ -524,7 +526,7 @@ bool UpdateAttempterAndroid::VerifyPayloadApplicable(
       VerifyPayloadParseManifest(metadata_filename, &manifest, error));
 
   FileDescriptorPtr fd(new EintrSafeFileDescriptor);
-  ErrorCode errorcode;
+  ErrorCode errorcode{};
 
   BootControlInterface::Slot current_slot = GetCurrentSlot();
   for (const PartitionUpdate& partition : manifest.partitions()) {
@@ -1204,7 +1206,7 @@ bool UpdateAttempterAndroid::setShouldSwitchSlotOnReboot(
   CHECK_NE(install_plan_.source_slot, UINT32_MAX);
   CHECK_NE(install_plan_.target_slot, UINT32_MAX);
 
-  ErrorCode error_code;
+  ErrorCode error_code{};
   if (!install_plan_.ParsePartitions(manifest.partitions(),
                                      boot_control_,
                                      manifest.block_size(),
