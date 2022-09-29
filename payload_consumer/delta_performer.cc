@@ -28,10 +28,12 @@
 #include <utility>
 #include <vector>
 
+#include <android-base/properties.h>
 #include <base/files/file_util.h>
 #include <base/format_macros.h>
 #include <base/metrics/histogram_macros.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/strings/stringprintf.h>
 #include <base/time/time.h>
 #include <brillo/data_encoding.h>
 #include <bsdiff/bspatch.h>
@@ -44,24 +46,15 @@
 #include "update_engine/common/error_code_utils.h"
 #include "update_engine/common/hardware_interface.h"
 #include "update_engine/common/prefs_interface.h"
-#include "update_engine/common/subprocess.h"
 #include "update_engine/common/terminator.h"
 #include "update_engine/common/utils.h"
-#include "update_engine/payload_consumer/bzip_extent_writer.h"
-#include "update_engine/payload_consumer/cached_file_descriptor.h"
-#include "update_engine/payload_consumer/certificate_parser_interface.h"
-#include "update_engine/payload_consumer/extent_reader.h"
-#include "update_engine/payload_consumer/extent_writer.h"
 #include "update_engine/payload_consumer/partition_update_generator_interface.h"
 #include "update_engine/payload_consumer/partition_writer.h"
 #if USE_FEC
 #include "update_engine/payload_consumer/fec_file_descriptor.h"
 #endif  // USE_FEC
-#include "update_engine/payload_consumer/file_descriptor_utils.h"
-#include "update_engine/payload_consumer/mount_history.h"
 #include "update_engine/payload_consumer/payload_constants.h"
 #include "update_engine/payload_consumer/payload_verifier.h"
-#include "update_engine/payload_consumer/xz_extent_writer.h"
 
 using google::protobuf::RepeatedPtrField;
 using std::min;
@@ -398,6 +391,29 @@ MetadataParseResult DeltaPerformer::ParsePayloadMetadata(
       base::TimeDelta::FromMinutes(5),                                      \
       20);
 
+void DeltaPerformer::CheckSPLDowngrade() {
+  if (!manifest_.has_security_patch_level()) {
+    return;
+  }
+  if (manifest_.security_patch_level().empty()) {
+    return;
+  }
+  const auto new_spl = manifest_.security_patch_level();
+  const auto current_spl =
+      android::base::GetProperty("ro.build.version.security_patch", "");
+  if (current_spl.empty()) {
+    LOG(ERROR) << "Failed to get ro.build.version.security_patch, unable to "
+                  "determine if this OTA is a SPL downgrade.";
+    return;
+  }
+  if (new_spl < current_spl) {
+    install_plan_->powerwash_required = true;
+    LOG(INFO) << "Target build SPL " << new_spl
+              << " is older than current build's SPL " << current_spl
+              << ", this OTA is an SPL downgrade. Data wipe will be required";
+  }
+}
+
 // Wrapper around write. Returns true if all requested bytes
 // were written, or false on any error, regardless of progress
 // and stores an action exit code in |error|.
@@ -443,6 +459,8 @@ bool DeltaPerformer::Write(const void* bytes, size_t count, ErrorCode* error) {
     DiscardBuffer(false, metadata_size_);
 
     block_size_ = manifest_.block_size();
+
+    CheckSPLDowngrade();
 
     // This populates |partitions_| and the |install_plan.partitions| with the
     // list of partitions from the manifest.
@@ -549,7 +567,7 @@ bool DeltaPerformer::Write(const void* bytes, size_t count, ErrorCode* error) {
 
     base::TimeTicks op_start_time = base::TimeTicks::Now();
 
-    bool op_result;
+    bool op_result{};
     const string op_name = InstallOperationTypeName(op.type());
     switch (op.type()) {
       case InstallOperation::REPLACE:
@@ -1214,7 +1232,7 @@ bool DeltaPerformer::CanResumeUpdate(PrefsInterface* prefs,
         interrupted_hash == update_check_response_hash))
     return false;
 
-  int64_t resumed_update_failures;
+  int64_t resumed_update_failures{};
   // Note that storing this value is optional, but if it is there it should
   // not be more than the limit.
   if (prefs->GetInt64(kPrefsResumedUpdateFailures, &resumed_update_failures) &&
@@ -1394,7 +1412,7 @@ bool DeltaPerformer::PrimeUpdateState() {
   total_bytes_received_ += buffer_offset_;
 
   // Speculatively count the resume as a failure.
-  int64_t resumed_update_failures;
+  int64_t resumed_update_failures{};
   if (prefs_->GetInt64(kPrefsResumedUpdateFailures, &resumed_update_failures)) {
     resumed_update_failures++;
   } else {
