@@ -285,6 +285,8 @@ cc_defaults {
         "android.hardware.boot@1.0",
         "android.hardware.boot@1.1",
         "android.hardware.boot@1.2",
+        "android.hardware.boot-V1-ndk",
+        "libboot_control_client",
     ],
     header_libs: [
         "avb_headers",
@@ -556,6 +558,7 @@ cc_defaults {
         "libpayload_extent_utils",
         "libcow_size_estimator",
         "liberofs",
+        "libselinux",
         "lz4diff-protos",
         "liblz4diff",
     ],
