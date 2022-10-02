@@ -18,6 +18,7 @@
 
 from __future__ import absolute_import
 from __future__ import print_function
+import binascii
 
 import hashlib
 import io
@@ -123,16 +124,19 @@ class Payload(object):
       payload_file_offset: the offset of the actual payload
     """
     if zipfile.is_zipfile(payload_file):
+      self.name = payload_file
       with zipfile.ZipFile(payload_file) as zfp:
         if "payload.bin" not in zfp.namelist():
           raise ValueError(f"payload.bin missing in archive {payload_file}")
         self.payload_file = zfp.open("payload.bin", "r")
     elif isinstance(payload_file, str):
+      self.name = payload_file
       payload_fp = open(payload_file, "rb")
       payload_bytes = mmap.mmap(
           payload_fp.fileno(), 0, access=mmap.ACCESS_READ)
       self.payload_file = io.BytesIO(payload_bytes)
     else:
+      self.name = payload_file.name
       self.payload_file = payload_file
     self.payload_file_offset = payload_file_offset
     self.manifest_hasher = None
@@ -163,7 +167,7 @@ class Payload(object):
     # us total data length
     for partition in reversed(self.manifest.partitions):
       for op in reversed(partition.operations):
-        if op.data_offset > 0:
+        if op.data_length > 0:
           return op.data_offset + op.data_length
     return 0
 
@@ -321,3 +325,17 @@ class Payload(object):
                metadata_size=metadata_size,
                part_sizes=part_sizes,
                report_out_file=report_out_file)
+
+  def CheckDataHash(self):
+    for part in self.manifest.partitions:
+      for op in part.operations:
+        if op.data_length == 0:
+          continue
+        if not op.data_sha256_hash:
+          raise PayloadError(
+              f"Operation {op} in partition {part.partition_name} missing data_sha256_hash")
+        blob = self.ReadDataBlob(op.data_offset, op.data_length)
+        blob_hash = hashlib.sha256(blob)
+        if blob_hash.digest() != op.data_sha256_hash:
+          raise PayloadError(
+              f"Operation {op} in partition {part.partition_name} has unexpected hash, expected: {binascii.hexlify(op.data_sha256_hash)}, actual: {blob_hash.hexdigest()}")
