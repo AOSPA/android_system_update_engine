@@ -21,6 +21,7 @@
 #include <memory>
 #include <ostream>
 #include <utility>
+#include <vector>
 
 #include <android-base/properties.h>
 #include <android-base/unique_fd.h>
@@ -33,9 +34,9 @@
 #include <log/log_safetynet.h>
 
 #include "update_engine/aosp/cleanup_previous_update_action.h"
+#include "update_engine/common/clock.h"
 #include "update_engine/common/constants.h"
 #include "update_engine/common/daemon_state_interface.h"
-#include "update_engine/common/clock.h"
 #include "update_engine/common/download_action.h"
 #include "update_engine/common/error_code_utils.h"
 #include "update_engine/common/file_fetcher.h"
@@ -47,6 +48,7 @@
 #include "update_engine/payload_consumer/file_descriptor.h"
 #include "update_engine/payload_consumer/file_descriptor_utils.h"
 #include "update_engine/payload_consumer/filesystem_verifier_action.h"
+#include "update_engine/payload_consumer/partition_writer.h"
 #include "update_engine/payload_consumer/payload_constants.h"
 #include "update_engine/payload_consumer/payload_metadata.h"
 #include "update_engine/payload_consumer/payload_verifier.h"
@@ -264,16 +266,8 @@ bool UpdateAttempterAndroid::ApplyPayload(
                             DeltaPerformer::CanResumeUpdate(prefs_, payload_id);
   if (!install_plan_.is_resume) {
     boot_control_->GetDynamicPartitionControl()->Cleanup();
-    // No need to reset dynamic_partititon_metadata_updated. If previous calls
-    // to AllocateSpaceForPayload uses the same payload_id, reuse preallocated
-    // space. Otherwise, DeltaPerformer re-allocates space when the payload is
-    // applied.
-    if (!DeltaPerformer::ResetUpdateProgress(
-            prefs_,
-            false /* quick */,
-            true /* skip_dynamic_partititon_metadata_updated */)) {
-      LOG(WARNING) << "Unable to reset the update progress.";
-    }
+    boot_control_->GetDynamicPartitionControl()->ResetUpdate(prefs_);
+
     if (!prefs_->SetString(kPrefsUpdateCheckResponseHash, payload_id)) {
       LOG(WARNING) << "Unable to save the update check response hash.";
     }
@@ -329,6 +323,10 @@ bool UpdateAttempterAndroid::ApplyPayload(
     LOG(FATAL) << "Unsupported sideload URI: " << payload_url;
 #else
     LibcurlHttpFetcher* libcurl_fetcher = new LibcurlHttpFetcher(hardware_);
+    if (!headers[kPayloadDownloadRetry].empty()) {
+      libcurl_fetcher->set_max_retry_count(
+          atoi(headers[kPayloadDownloadRetry].c_str()));
+    }
     libcurl_fetcher->set_server_to_check(ServerToCheck::kDownload);
     fetcher = libcurl_fetcher;
 #endif  // _UE_SIDELOAD
@@ -343,6 +341,9 @@ bool UpdateAttempterAndroid::ApplyPayload(
     LOG(INFO) << "Using proxy url from payload headers: "
               << headers[kPayloadPropertyNetworkProxy];
     fetcher->SetProxies({headers[kPayloadPropertyNetworkProxy]});
+  }
+  if (!headers[kPayloadDisableVABC].empty()) {
+    install_plan_.disable_vabc = true;
   }
 
   BuildUpdateActions(fetcher);
@@ -428,7 +429,7 @@ bool UpdateAttempterAndroid::ResetStatus(brillo::ErrorPtr* error) {
 
   if (!boot_control_->GetDynamicPartitionControl()->ResetUpdate(prefs_)) {
     LOG(WARNING) << "Failed to reset snapshots. UpdateStatus is IDLE but"
-                  << "space might not be freed.";
+                 << "space might not be freed.";
   }
   switch (status_) {
     case UpdateStatus::IDLE: {
@@ -467,7 +468,7 @@ bool UpdateAttempterAndroid::VerifyPayloadParseManifest(
         FROM_HERE,
         "Failed to read payload header from " + metadata_filename);
   }
-  ErrorCode errorcode;
+  ErrorCode errorcode{};
   PayloadMetadata payload_metadata;
   if (payload_metadata.ParsePayloadHeader(metadata, &errorcode) !=
       MetadataParseResult::kSuccess) {
@@ -526,7 +527,7 @@ bool UpdateAttempterAndroid::VerifyPayloadApplicable(
       VerifyPayloadParseManifest(metadata_filename, &manifest, error));
 
   FileDescriptorPtr fd(new EintrSafeFileDescriptor);
-  ErrorCode errorcode;
+  ErrorCode errorcode{};
 
   BootControlInterface::Slot current_slot = GetCurrentSlot();
   for (const PartitionUpdate& partition : manifest.partitions()) {
@@ -1189,7 +1190,7 @@ bool UpdateAttempterAndroid::setShouldSwitchSlotOnReboot(
   CHECK_NE(install_plan_.source_slot, UINT32_MAX);
   CHECK_NE(install_plan_.target_slot, UINT32_MAX);
 
-  ErrorCode error_code;
+  ErrorCode error_code{};
   if (!install_plan_.ParsePartitions(manifest.partitions(),
                                      boot_control_,
                                      manifest.block_size(),
@@ -1228,6 +1229,7 @@ bool UpdateAttempterAndroid::resetShouldSwitchSlotOnReboot(
     return LogAndSetError(
         error, FROM_HERE, "Already processing an update, cancel it first.");
   }
+  TEST_AND_RETURN_FALSE(ClearUpdateCompletedMarker());
   // Update the boot flags so the current slot has higher priority.
   if (!boot_control_->SetActiveBootSlot(GetCurrentSlot())) {
     return LogAndSetError(error, FROM_HERE, "Failed to SetActiveBootSlot");
