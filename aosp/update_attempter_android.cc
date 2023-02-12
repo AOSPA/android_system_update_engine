@@ -144,7 +144,9 @@ UpdateAttempterAndroid::UpdateAttempterAndroid(
       hardware_(hardware),
       apex_handler_android_(std::move(apex_handler)),
       processor_(new ActionProcessor()),
-      clock_(new Clock()) {
+      clock_(new Clock()),
+      metric_bytes_downloaded_(kPrefsCurrentBytesDownloaded, prefs_),
+      metric_total_bytes_downloaded_(kPrefsTotalBytesDownloaded, prefs_) {
   metrics_reporter_ = metrics::CreateMetricsReporter(
       boot_control_->GetDynamicPartitionControl(), &install_plan_);
   network_selector_ = network::CreateNetworkSelector();
@@ -322,6 +324,8 @@ bool UpdateAttempterAndroid::ApplyPayload(
   } else {
 #ifdef _UE_SIDELOAD
     LOG(FATAL) << "Unsupported sideload URI: " << payload_url;
+    return false;  // NOLINT, unreached but analyzer might not know.
+                   // Suppress warnings about null 'fetcher' after this.
 #else
     LibcurlHttpFetcher* libcurl_fetcher = new LibcurlHttpFetcher(hardware_);
     if (!headers[kPayloadDownloadRetry].empty()) {
@@ -570,6 +574,8 @@ bool UpdateAttempterAndroid::VerifyPayloadApplicable(
 void UpdateAttempterAndroid::ProcessingDone(const ActionProcessor* processor,
                                             ErrorCode code) {
   LOG(INFO) << "Processing Done.";
+  metric_bytes_downloaded_.Flush(true);
+  metric_total_bytes_downloaded_.Flush(true);
   last_error_ = code;
   if (status_ == UpdateStatus::CLEANUP_PREVIOUS_UPDATE) {
     TerminateUpdateAndNotify(code);
@@ -667,14 +673,8 @@ void UpdateAttempterAndroid::BytesReceived(uint64_t bytes_progressed,
   }
 
   // Update the bytes downloaded in prefs.
-  int64_t current_bytes_downloaded =
-      metrics_utils::GetPersistedValue(kPrefsCurrentBytesDownloaded, prefs_);
-  int64_t total_bytes_downloaded =
-      metrics_utils::GetPersistedValue(kPrefsTotalBytesDownloaded, prefs_);
-  prefs_->SetInt64(kPrefsCurrentBytesDownloaded,
-                   current_bytes_downloaded + bytes_progressed);
-  prefs_->SetInt64(kPrefsTotalBytesDownloaded,
-                   total_bytes_downloaded + bytes_progressed);
+  metric_bytes_downloaded_ += bytes_progressed;
+  metric_total_bytes_downloaded_ += bytes_progressed;
 }
 
 bool UpdateAttempterAndroid::ShouldCancel(ErrorCode* cancel_reason) {
@@ -754,7 +754,7 @@ void UpdateAttempterAndroid::TerminateUpdateAndNotify(ErrorCode error_code) {
     prefs_->Delete(kPrefsPayloadAttemptNumber);
     metrics_utils::SetSystemUpdatedMarker(clock_.get(), prefs_);
     // Clear the total bytes downloaded if and only if the update succeeds.
-    prefs_->SetInt64(kPrefsTotalBytesDownloaded, 0);
+    metric_total_bytes_downloaded_.Delete();
   }
 }
 
@@ -882,8 +882,7 @@ void UpdateAttempterAndroid::CollectAndReportUpdateMetricsOnUpdateFinished(
       attempt_result,
       error_code);
 
-  int64_t current_bytes_downloaded =
-      metrics_utils::GetPersistedValue(kPrefsCurrentBytesDownloaded, prefs_);
+  int64_t current_bytes_downloaded = metric_bytes_downloaded_.get();
   metrics_reporter_->ReportUpdateAttemptDownloadMetrics(
       current_bytes_downloaded,
       0,
@@ -900,8 +899,7 @@ void UpdateAttempterAndroid::CollectAndReportUpdateMetricsOnUpdateFinished(
     // For android metrics, we only care about the total bytes downloaded
     // for all sources; for now we assume the only download source is
     // HttpsServer.
-    int64_t total_bytes_downloaded =
-        metrics_utils::GetPersistedValue(kPrefsTotalBytesDownloaded, prefs_);
+    int64_t total_bytes_downloaded = metric_total_bytes_downloaded_.get();
     int64_t num_bytes_downloaded[kNumDownloadSources] = {};
     num_bytes_downloaded[DownloadSource::kDownloadSourceHttpsServer] =
         total_bytes_downloaded;
@@ -1064,7 +1062,7 @@ void UpdateAttempterAndroid::UpdatePrefsOnUpdateStart(bool is_resume) {
 
 void UpdateAttempterAndroid::ClearMetricsPrefs() {
   CHECK(prefs_);
-  prefs_->Delete(kPrefsCurrentBytesDownloaded);
+  metric_bytes_downloaded_.Delete();
   prefs_->Delete(kPrefsNumReboots);
   prefs_->Delete(kPrefsSystemUpdatedMarker);
   prefs_->Delete(kPrefsUpdateTimestampStart);
