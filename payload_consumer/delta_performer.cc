@@ -474,7 +474,7 @@ bool DeltaPerformer::Write(const void* bytes, size_t count, ErrorCode* error) {
       manifest_.mutable_dynamic_partition_metadata()
           ->set_vabc_compression_param("none");
       for (auto& partition : *manifest_.mutable_partitions()) {
-        int new_cow_size = partition.new_partition_info().size();
+        auto new_cow_size = partition.new_partition_info().size();
         for (const auto& operation : partition.merge_operations()) {
           if (operation.type() == CowMergeOperation::COW_COPY) {
             new_cow_size -=
@@ -1320,10 +1320,7 @@ bool DeltaPerformer::CanResumeUpdate(PrefsInterface* prefs,
   return true;
 }
 
-bool DeltaPerformer::ResetUpdateProgress(
-    PrefsInterface* prefs,
-    bool quick,
-    bool skip_dynamic_partititon_metadata_updated) {
+bool DeltaPerformer::ResetUpdateProgress(PrefsInterface* prefs, bool quick) {
   TEST_AND_RETURN_FALSE(prefs->SetInt64(kPrefsUpdateStateNextOperation,
                                         kUpdateStateOperationInvalid));
   if (!quick) {
@@ -1338,10 +1335,8 @@ bool DeltaPerformer::ResetUpdateProgress(
     prefs->Delete(kPrefsPostInstallSucceeded);
     prefs->Delete(kPrefsVerityWritten);
 
-    if (!skip_dynamic_partititon_metadata_updated) {
-      LOG(INFO) << "Resetting recorded hash for prepared partitions.";
-      prefs->Delete(kPrefsDynamicPartitionMetadataUpdated);
-    }
+    LOG(INFO) << "Resetting recorded hash for prepared partitions.";
+    prefs->Delete(kPrefsDynamicPartitionMetadataUpdated);
   }
   return true;
 }
