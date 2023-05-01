@@ -207,6 +207,7 @@ cc_defaults {
         "libcow_operation_convert",
         "lz4diff-protos",
         "liblz4patch",
+        "libzstd",
     ],
     shared_libs: [
         "libbase",
@@ -557,7 +558,10 @@ cc_binary {
         "libupdate_engine_android_exports",
     ],
 
-    static_libs: ["libupdate_engine_android"],
+    static_libs: [
+        "libupdate_engine_android",
+        "libgflags",
+    ],
     required: [
         "cacerts_google",
         "otacerts",
@@ -699,6 +703,7 @@ cc_defaults {
         "libselinux",
         "lz4diff-protos",
         "liblz4diff",
+        "libzstd",
     ],
     shared_libs: [
         "libbase",
@@ -856,6 +861,7 @@ cc_binary_host {
         "libavb_host_sysdeps",
         "libpayload_consumer",
         "libpayload_generator",
+        "libgflags",
     ],
 
     srcs: ["payload_generator/generate_delta_main.cc"],
@@ -873,6 +879,7 @@ cc_test {
     static_libs: [
         "libpayload_consumer",
         "libpayload_generator",
+        "libgflags",
     ],
 
     srcs: ["payload_generator/generate_delta_main.cc"],
@@ -1068,6 +1075,7 @@ cc_test {
         "libdm",
         "libgmock",
         "libz",
+        "libzstd",
     ],
     shared_libs: [
         "libssl",
